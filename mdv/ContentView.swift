@@ -37,6 +37,52 @@ struct ContentView: View {
     @State private var findFieldRequestFocus: Bool = false
     @StateObject private var keyMonitor = KeyMonitor()
 
+    // Global (cross-history) search
+    @State private var globalQuery: String = ""
+    @State private var globalHits: [Database.SearchHit] = []
+    @State private var globalSearchToken: Int = 0
+    @State private var hoveredHit: UUID? = nil
+    @FocusState private var globalSearchFocused: Bool
+
+    /// Tracks which pane the user most recently clicked into, so Cmd-F can route
+    /// the find action correctly. SwiftUI's List on macOS doesn't reliably hand
+    /// first-responder status to its underlying NSTableView, and `simultaneousGesture`
+    /// loses to the text-selection gesture inside the markdown view — so we hook an
+    /// NSEvent local mouse-down monitor and classify clicks by x-coordinate relative
+    /// to the sidebar.
+    enum PaneFocus { case sidebar, viewer }
+    @StateObject private var paneTracker = PaneTracker()
+
+    final class PaneTracker: ObservableObject {
+        @Published var lastFocusedPane: PaneFocus = .viewer
+        var sidebarRightEdge: CGFloat = 240
+        private var monitor: Any?
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self else { return event }
+                // Only classify clicks that land inside an actual content window.
+                // Menu-bar items, popovers, etc. have nil event.window and would
+                // otherwise misclassify by their screen-space x-coordinate.
+                guard let window = event.window else { return event }
+                let p = event.locationInWindow
+                // Skip the title bar / toolbar strip — clicking the title doesn't
+                // mean the user shifted focus into the viewer pane.
+                let titleBarHeight: CGFloat = 52
+                guard p.y < window.frame.height - titleBarHeight else { return event }
+                self.lastFocusedPane = (p.x <= self.sidebarRightEdge) ? .sidebar : .viewer
+                return event
+            }
+        }
+
+        func uninstall() {
+            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+        }
+
+        deinit { uninstall() }
+    }
+
     struct SearchMatch: Equatable {
         let blockIndex: Int
     }
@@ -118,7 +164,14 @@ struct ContentView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .findInDocument)) { _ in
-            openFind()
+            if shouldRouteToGlobalSearch() {
+                focusGlobalSearch()
+            } else {
+                openFind()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .searchHistory)) { _ in
+            focusGlobalSearch()
         }
         .onOpenURL { url in
             loadFile(url)
@@ -140,6 +193,8 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            paneTracker.sidebarRightEdge = sidebarWidth + 8 // include drag handle width
+            paneTracker.install()
             if let url = initialURL {
                 loadFile(url)
             } else if let last = history.entries.first {
@@ -147,47 +202,295 @@ struct ContentView: View {
                 loadCurrentEntry()
             }
         }
+        .onDisappear {
+            paneTracker.uninstall()
+        }
+        .onChange(of: sidebarWidth) { newValue in
+            paneTracker.sidebarRightEdge = newValue + 8
+        }
     }
 
     // MARK: - Sidebar
 
     private var sidebar: some View {
-        Group {
-            if history.entries.isEmpty {
+        VStack(spacing: 0) {
+            sidebarSearchField
+                .padding(.horizontal, 10)
+                .padding(.top, 10)
+                .padding(.bottom, 8)
+
+            if !globalQuery.isEmpty {
+                globalSearchResults
+            } else if history.entries.isEmpty {
                 emptyHistory
             } else {
-                List(selection: $selectedEntry) {
-                    Section("History") {
-                        ForEach(history.entries) { entry in
-                            sidebarRow(entry)
-                                .tag(entry)
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button(role: .destructive) {
-                                        delete(entry)
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
-                                    .tint(.red)
-                                }
+                historyList
+            }
+        }
+        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+    }
+
+    private var historyList: some View {
+        List(selection: $selectedEntry) {
+            Section("History") {
+                ForEach(history.entries) { entry in
+                    sidebarRow(entry)
+                        .tag(entry)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                delete(entry)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                            .tint(.red)
+                        }
+                        .contextMenu {
+                            Button("Reveal in Finder") {
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: entry.path)])
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                delete(entry)
+                            } label: {
+                                Text("Remove from History")
+                            }
+                        }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+    }
+
+    // MARK: - Sidebar search field
+
+    private var sidebarSearchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(.secondary)
+            TextField("Search history", text: $globalQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($globalSearchFocused)
+                .onSubmit {
+                    if let first = globalHits.first { openHit(first) }
+                }
+                .onExitCommand {
+                    clearGlobalSearch()
+                }
+            if !globalQuery.isEmpty {
+                Button {
+                    clearGlobalSearch()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear (esc)")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(globalSearchFocused ? 0.10 : 0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(globalSearchFocused ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+        )
+        .animation(.easeOut(duration: 0.12), value: globalSearchFocused)
+        .onChange(of: globalQuery) { _ in runGlobalSearch() }
+    }
+
+    // MARK: - Global search results
+
+    private var globalSearchResults: some View {
+        Group {
+            if globalHits.isEmpty {
+                VStack(spacing: 10) {
+                    Spacer()
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 24, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text("No matches")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 0) {
+                            Text("\(globalHits.count) match\(globalHits.count == 1 ? "" : "es")")
+                                .font(.system(size: 11, weight: .semibold))
+                                .textCase(.uppercase)
+                                .tracking(0.6)
+                                .foregroundStyle(.tertiary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 4)
+                        .padding(.bottom, 6)
+
+                        ForEach(globalHits) { hit in
+                            hitRow(hit)
                                 .contextMenu {
+                                    Button("Open") { openHit(hit) }
                                     Button("Reveal in Finder") {
-                                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: entry.path)])
-                                    }
-                                    Divider()
-                                    Button(role: .destructive) {
-                                        delete(entry)
-                                    } label: {
-                                        Text("Remove from History")
+                                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: hit.path)])
                                     }
                                 }
                         }
                     }
+                    .padding(.bottom, 8)
                 }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
             }
         }
-        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+    }
+
+    private func hitRow(_ hit: Database.SearchHit) -> some View {
+        let isHovered = hoveredHit == hit.id
+        let isCurrent = selectedEntry?.path == hit.path
+
+        return Button {
+            openHit(hit)
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Image(systemName: "doc.text")
+                        .font(.system(size: 11))
+                        .foregroundStyle(isCurrent ? Color.white : Color.secondary)
+                    Text(hit.filename)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(isCurrent ? Color.white : Color.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                snippetView(hit.snippet, dim: isCurrent)
+                    .font(.system(size: 11))
+                    .foregroundStyle(isCurrent ? Color.white.opacity(0.85) : Color.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Group {
+                    if isCurrent {
+                        Text(prettyPath(hit.path)).foregroundStyle(Color.white.opacity(0.7))
+                    } else {
+                        Text(prettyPath(hit.path)).foregroundStyle(.tertiary)
+                    }
+                }
+                .font(.system(size: 10))
+                .lineLimit(1)
+                .truncationMode(.head)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(isCurrent ? Color.accentColor : (isHovered ? Color.primary.opacity(0.06) : Color.clear))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 6)
+        .onHover { inside in
+            hoveredHit = inside ? hit.id : nil
+        }
+    }
+
+    /// Render an FTS5 snippet, bolding the marked match spans (delimited by U+0002/U+0003).
+    private func snippetView(_ snippet: String, dim: Bool) -> Text {
+        var out = Text("")
+        var inMatch = false
+        var buffer = ""
+        let flush: (inout Text, String, Bool) -> Void = { acc, str, hl in
+            guard !str.isEmpty else { return }
+            if hl {
+                acc = acc + Text(str).fontWeight(.semibold).foregroundColor(dim ? .white : .primary)
+            } else {
+                acc = acc + Text(str)
+            }
+        }
+        for ch in snippet {
+            if ch == "\u{2}" {
+                flush(&out, buffer, inMatch); buffer.removeAll()
+                inMatch = true
+            } else if ch == "\u{3}" {
+                flush(&out, buffer, inMatch); buffer.removeAll()
+                inMatch = false
+            } else {
+                buffer.append(ch)
+            }
+        }
+        flush(&out, buffer, inMatch)
+        return out
+    }
+
+    // MARK: - Global search actions
+
+    private func runGlobalSearch() {
+        let q = globalQuery
+        globalSearchToken &+= 1
+        let token = globalSearchToken
+        guard !q.trimmingCharacters(in: .whitespaces).isEmpty else {
+            globalHits = []
+            return
+        }
+        Database.shared.search(query: q) { hits in
+            // Drop stale results from a query the user has since edited.
+            guard token == globalSearchToken else { return }
+            globalHits = hits
+        }
+    }
+
+    private func openHit(_ hit: Database.SearchHit) {
+        let q = globalQuery
+        if let entry = history.entries.first(where: { $0.path == hit.path }) {
+            selectedEntry = entry
+        } else {
+            // Fallback if the file is in the index but not in the in-memory history
+            // (shouldn't happen today, but guards against future drift).
+            loadFile(URL(fileURLWithPath: hit.path))
+        }
+        // Keep the search field focused and the hit list visible so the user can
+        // click multiple results in turn without re-typing. Seed the in-document find
+        // with the same query so matches in the rendered article are highlighted.
+        // recomputeMatches() runs explicitly because the findBar's onChange(of: query)
+        // only fires while the bar is in the view hierarchy, but we set query before
+        // isSearching flips on.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            query = q
+            recomputeMatches()
+            withAnimation(.easeOut(duration: 0.18)) {
+                isSearching = true
+            }
+            // The button click stole focus from the search field; restore it so the
+            // user can keep typing or just hit ↑/↓ to walk through results.
+            globalSearchFocused = true
+        }
+    }
+
+    private func clearGlobalSearch() {
+        globalQuery = ""
+        globalHits = []
+        globalSearchFocused = false
+    }
+
+    private func focusGlobalSearch() {
+        globalSearchFocused = true
+    }
+
+    /// Cmd-F is context-sensitive: if the user is currently working inside the sidebar
+    /// (either list or search field), it focuses the global search. Anywhere else,
+    /// it opens the in-document find bar.
+    private func shouldRouteToGlobalSearch() -> Bool {
+        if globalSearchFocused { return true }
+        return paneTracker.lastFocusedPane == .sidebar
     }
 
     private func sidebarRow(_ entry: HistoryEntry) -> some View {
@@ -212,27 +515,14 @@ struct ContentView: View {
     }
 
     private var emptyHistory: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                Text("History")
-                    .font(.system(size: 11, weight: .semibold))
-                    .textCase(.uppercase)
-                    .tracking(0.6)
-                    .foregroundStyle(.tertiary)
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 14)
-
+        VStack(spacing: 8) {
             Spacer()
-            VStack(spacing: 8) {
-                Image(systemName: "tray")
-                    .font(.system(size: 24, weight: .light))
-                    .foregroundStyle(.tertiary)
-                Text("No files yet")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
+            Image(systemName: "tray")
+                .font(.system(size: 24, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text("No files yet")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

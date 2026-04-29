@@ -31,6 +31,10 @@ struct mdvApp: App {
                     NotificationCenter.default.post(name: .findInDocument, object: nil)
                 }
                 .keyboardShortcut("f", modifiers: .command)
+                Button("Search History…") {
+                    NotificationCenter.default.post(name: .searchHistory, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
             }
         }
     }
@@ -56,4 +60,5 @@ extension Notification.Name {
     static let openFileInNewWindow = Notification.Name("openFileInNewWindow")
     static let openURLInWindow = Notification.Name("openURLInWindow")
     static let findInDocument = Notification.Name("findInDocument")
+    static let searchHistory = Notification.Name("searchHistory")
 }
