@@ -322,12 +322,12 @@ extension MDVTheme {
         isDark: false,
         background: Color(rgba: 0xF4EFE3FF),          // desaturated warm cream — less yellow than parchment
         secondaryBackground: Color(rgba: 0xEAE5D6FF), // for code blocks / table stripes
-        text: Color(rgba: 0x3B3026FF),                // soft warm brown — lighter than near-black; Alegreya can get heavy
+        text: Color(rgba: 0x42372CFF),                // subtly lighter than the heading — counteracts Alegreya's natural heft and keeps body distinct from H*
         secondaryText: Color(rgba: 0x6A5C4DFF),
         tertiaryText: Color(rgba: 0x968874FF),
-        heading: Color(rgba: 0x2D2118FF),             // slightly darker than body; weight + size carry the rest
+        heading: Color(rgba: 0x2D2118FF),             // darker cordovan — weight + size + this delta carry the hierarchy
         link: Color(rgba: 0x2C5F8DFF),                // muted azulejo blue
-        strong: Color(rgba: 0x2D2118FF),
+        strong: Color(rgba: 0x42372CFF),              // = body color; semibold weight alone provides emphasis (don't borrow heading darkness)
         border: Color(rgba: 0xE6DEC2FF),
         divider: Color(rgba: 0xE6DEC2FF),             // quieter rule for H1
         blockquoteBar: Color(rgba: 0xB0623EFF),       // terracotta

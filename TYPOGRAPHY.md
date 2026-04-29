@@ -59,14 +59,22 @@ These are the constants we hold across themes unless a theme explicitly override
 | --- | --- | --- |
 | `background` | `#F4EFE3` | Desaturated warm cream. Started at `#F8F1DE` (parchment) — that pulled too yellow in extended reading. |
 | `secondaryBackground` | `#EAE5D6` | For code blocks and table stripes; deeper than the body but stays in the cream family. |
-| `text` | `#3B3026` | Soft warm brown — about equivalent to `Color(red: 0.23, green: 0.19, blue: 0.15)`. Pure black or near-black makes Alegreya feel heavy on a warm background; this lifts. |
+| `text` | `#42372C` | Soft warm brown. Subtly lighter than the heading — Alegreya is heavy by nature, so collapsing body and heading to the same dark value makes paragraphs feel oppressive. The lift puts a visible delta between body and H* without losing contrast against the cream (≈11:1, well above WCAG AA). Started at `#3B3026` ((0.23, 0.19, 0.15)) — close to heading; lifted ~7 per channel. |
 | `secondaryText` | `#6A5C4D` | For blockquote text and similar de-emphasized prose. |
 | `tertiaryText` | `#968874` | For very small captions and tertiary slots. |
-| `heading` | `#2D2118` | Slightly darker than body. Weight + size do the rest of the work. |
+| `heading` | `#2D2118` | Darker cordovan. Weight + size + the body↔heading color delta carry the hierarchy together. |
 | `link` | `#2C5F8D` | Muted azulejo blue — the deep blue of glazed Spanish tile, instantly readable as a link without screaming. |
-| `strong` | `#2D2118` | Same as heading; bold weight provides the emphasis. |
+| `strong` | `#42372C` | Equal to body. Bold weight alone provides the emphasis — borrowing the heading's darkness for in-paragraph **bold** runs would re-introduce the same body↔heading collapse we just engineered out. **Sevilla-specific:** other themes leave `strong` at the heading darkness and rely on the contrast difference; we don't, because the heaviness of Alegreya at semibold already provides plenty of pop. |
 | `border` / `divider` | `#E6DEC2` | Muted parchment. Used for the H1 rule, table borders, thematic breaks. Quiet on purpose. |
 | `blockquoteBar` | `#B0623E` | Terracotta. The single warm accent in the palette. |
+
+### Sevilla-specific deviations from the cross-theme defaults
+
+These are not generalizable to other themes — they tune around Alegreya's specific weight/heft characteristics.
+
+- **Body text is not heading darkness.** With most fonts the body and heading can sit at the same hue with weight + size carrying the hierarchy. Alegreya is *heavy* — set body to heading-darkness and a paragraph reads as a wall. Body at `#42372C` is one stop lighter than heading `#2D2118` so paragraphs breathe.
+- **`strong` (in-paragraph bold) inherits body color, not heading color.** Bold Alegreya at heading darkness pops too hard mid-paragraph and re-creates the body↔heading collapse we lifted body to avoid. Bold weight alone is enough emphasis.
+- **H2 has no rule, H1 has a faded rule.** The default theme shows both because system sans-serif headings need the rule to read as breaks. Alegreya at any size already announces itself as a heading; rules add unnecessary mass.
 
 ### What we explicitly did NOT do
 
