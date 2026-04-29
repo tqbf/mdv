@@ -44,8 +44,13 @@ struct mdvApp: App {
                 }
                 .keyboardShortcut("d", modifiers: .command)
 
-                Button("Flip to Placeholder") {
-                    NotificationCenter.default.post(name: .togglePlaceholder, object: nil)
+                Button("Set Placeholder") {
+                    NotificationCenter.default.post(name: .setPlaceholder, object: nil)
+                }
+                .keyboardShortcut("0", modifiers: [.command, .shift])
+
+                Button("Jump to Placeholder") {
+                    NotificationCenter.default.post(name: .jumpToPlaceholder, object: nil)
                 }
                 .keyboardShortcut("0", modifiers: .command)
 
@@ -94,5 +99,6 @@ extension Notification.Name {
     static let searchHistory = Notification.Name("searchHistory")
     static let toggleBookmark = Notification.Name("toggleBookmark")
     static let openBookmarkSlot = Notification.Name("openBookmarkSlot")
-    static let togglePlaceholder = Notification.Name("togglePlaceholder")
+    static let setPlaceholder = Notification.Name("setPlaceholder")
+    static let jumpToPlaceholder = Notification.Name("jumpToPlaceholder")
 }

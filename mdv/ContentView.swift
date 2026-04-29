@@ -226,8 +226,11 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openBookmarkSlot)) { notif in
             if let n = notif.object as? Int { openBookmarkSlot(n) }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .togglePlaceholder)) { _ in
-            togglePlaceholder()
+        .onReceive(NotificationCenter.default.publisher(for: .setPlaceholder)) { _ in
+            setPlaceholder()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .jumpToPlaceholder)) { _ in
+            jumpToPlaceholder()
         }
         .onOpenURL { url in
             loadFile(url)
@@ -1012,7 +1015,7 @@ struct ContentView: View {
     private func placeholderRow(_ p: PlaceholderAnchor) -> some View {
         let missing = !FileManager.default.fileExists(atPath: p.path)
         return Button {
-            togglePlaceholder()
+            jumpToPlaceholder()
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "pin.fill")
@@ -1052,7 +1055,7 @@ struct ContentView: View {
         .onHover { inside in
             hoveredPlaceholder = inside
         }
-        .help("Placeholder (⌘0): swap back here")
+        .help("Placeholder — ⌘0 to jump here, ⇧⌘0 to overwrite")
         .contextMenu {
             Button("Clear Placeholder") { placeholder = nil }
         }
@@ -1524,27 +1527,27 @@ struct ContentView: View {
         }
     }
 
-    /// ⌘0: flip between current spot and the placeholder.
-    /// - First press (no placeholder set): captures current as placeholder.
-    /// - Subsequent press: jumps to placeholder while saving current as the new placeholder,
-    ///   so a second ⌘0 brings you back. Pure two-position toggle.
-    private func togglePlaceholder() {
+    /// ⇧⌘0: capture current spot as the placeholder. Overwrites any prior value.
+    private func setPlaceholder() {
         guard let entry = selectedEntry else { return }
         let block = hoveredBlock ?? topVisibleBlock
         let docBlocks = blocks
         let fp = (block < docBlocks.count) ? bookmarkFingerprint(forBlock: docBlocks[block]) : ""
-        let current = PlaceholderAnchor(
+        placeholder = PlaceholderAnchor(
             path: entry.path,
             title: bookmarkTitle(forBlockAt: block),
             blockIndex: block,
             blockFingerprint: fp
         )
-        if let prev = placeholder {
-            placeholder = current
-            jumpTo(path: prev.path, blockIndex: prev.blockIndex, fingerprint: prev.blockFingerprint)
-        } else {
-            placeholder = current
+    }
+
+    /// ⌘0: jump to the placeholder if one is set; beep otherwise.
+    private func jumpToPlaceholder() {
+        guard let p = placeholder else {
+            NSSound.beep()
+            return
         }
+        jumpTo(path: p.path, blockIndex: p.blockIndex, fingerprint: p.blockFingerprint)
     }
 
     private func loadCurrentEntry() {
