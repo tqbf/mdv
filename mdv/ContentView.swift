@@ -59,6 +59,16 @@ struct ContentView: View {
     }
     @State private var placeholder: PlaceholderAnchor? = nil
 
+    /// Highlights "the bookmark you're currently on" in the panel. Set by
+    /// loadBookmark / addBookmarkAtCurrentSpot; cleared by any non-bookmark
+    /// file-open path (history click, drag-drop, ⌘O, Open-URL).
+    @State private var currentBookmarkID: Int64? = nil
+    /// Same idea for the ⌘0 placeholder row.
+    @State private var placeholderIsCurrent: Bool = false
+    /// Suppresses the clear-on-selectedEntry-change in onChange while a
+    /// bookmark navigation is in flight (which itself flips selectedEntry).
+    @State private var bookmarkNavInProgress: Bool = false
+
     struct TOCHeading: Identifiable {
         let level: Int
         let text: String
@@ -239,6 +249,13 @@ struct ContentView: View {
             handleDrop(providers)
         }
         .onChange(of: selectedEntry) { _ in
+            // Selection changed by something other than a bookmark/placeholder
+            // jump? Then drop the "active bookmark" highlight.
+            if !bookmarkNavInProgress {
+                currentBookmarkID = nil
+                placeholderIsCurrent = false
+            }
+            bookmarkNavInProgress = false
             loadCurrentEntry()
         }
         .onChange(of: rawMarkdown) { _ in
@@ -1014,40 +1031,50 @@ struct ContentView: View {
 
     private func placeholderRow(_ p: PlaceholderAnchor) -> some View {
         let missing = !FileManager.default.fileExists(atPath: p.path)
+        let isCurrent = placeholderIsCurrent
         return Button {
             jumpToPlaceholder()
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "pin.fill")
                     .font(.system(size: 12))
-                    .foregroundStyle(missing ? Color.orange : Color.accentColor)
+                    .foregroundStyle(
+                        missing ? Color.orange :
+                        (isCurrent ? Color.white : Color.accentColor)
+                    )
                     .frame(width: 16)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(p.title)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(missing ? Color.secondary : Color.primary)
+                        .foregroundStyle(
+                            isCurrent ? Color.white :
+                            (missing ? Color.secondary : Color.primary)
+                        )
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text(URL(fileURLWithPath: p.path).lastPathComponent)
                         .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isCurrent ? Color.white.opacity(0.8) : .secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
-                hotkeyBadge(0, onAccent: false)
+                hotkeyBadge(0, onAccent: isCurrent)
             }
-            .opacity(missing ? 0.6 : 1.0)
+            .opacity(missing && !isCurrent ? 0.6 : 1.0)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(hoveredPlaceholder ? Color.primary.opacity(0.06) : Color.accentColor.opacity(0.08))
+                    .fill(
+                        isCurrent ? Color.accentColor :
+                        (hoveredPlaceholder ? Color.primary.opacity(0.06) : Color.accentColor.opacity(0.08))
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(Color.accentColor.opacity(0.25), lineWidth: 0.5)
+                    .stroke(isCurrent ? Color.clear : Color.accentColor.opacity(0.25), lineWidth: 0.5)
             )
             .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         }
@@ -1067,6 +1094,7 @@ struct ContentView: View {
         let hovered = hoveredBookmark == bookmark.id
         let dragging = draggingBookmarkID == bookmark.id
         let dropHover = dropTargetBookmarkID == bookmark.id
+        let isCurrent = currentBookmarkID == bookmark.id
         let filename = URL(fileURLWithPath: bookmark.path).lastPathComponent
 
         return Button {
@@ -1075,34 +1103,41 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Image(systemName: missing ? "exclamationmark.triangle.fill" : "bookmark.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(missing ? Color.orange : Color.accentColor.opacity(0.7))
+                    .foregroundStyle(
+                        missing ? Color.orange :
+                        (isCurrent ? Color.white : Color.accentColor.opacity(0.7))
+                    )
                     .frame(width: 16)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(bookmark.title.isEmpty ? "(unnamed)" : bookmark.title)
                         .font(.system(size: 13))
-                        .foregroundStyle(missing ? Color.secondary : Color.primary)
+                        .foregroundStyle(
+                            isCurrent ? Color.white :
+                            (missing ? Color.secondary : Color.primary)
+                        )
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Text(filename)
                         .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isCurrent ? Color.white.opacity(0.8) : .secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
                 if let n = slot {
-                    hotkeyBadge(n, onAccent: false)
+                    hotkeyBadge(n, onAccent: isCurrent)
                 }
             }
-            .opacity(missing ? 0.6 : (dragging ? 0.4 : 1.0))
+            .opacity(missing && !isCurrent ? 0.6 : (dragging ? 0.4 : 1.0))
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(
-                        dropHover ? Color.accentColor.opacity(0.18) :
-                        (hovered ? Color.primary.opacity(0.06) : Color.clear)
+                        isCurrent ? Color.accentColor :
+                        (dropHover ? Color.accentColor.opacity(0.18) :
+                        (hovered ? Color.primary.opacity(0.06) : Color.clear))
                     )
             )
             .overlay(alignment: .top) {
@@ -1467,12 +1502,17 @@ struct ContentView: View {
         let block = hoveredBlock ?? topVisibleBlock
         let docBlocks = blocks
         let fp = (block < docBlocks.count) ? bookmarkFingerprint(forBlock: docBlocks[block]) : ""
-        _ = bookmarks.add(
+        let added = bookmarks.add(
             path: entry.path,
             title: bookmarkTitle(forBlockAt: block),
             blockIndex: block,
             fingerprint: fp
         )
+        // The bookmark you just added is the one you're "on."
+        if let id = added?.id {
+            currentBookmarkID = id
+            placeholderIsCurrent = false
+        }
         if bookmarks.bookmarks.count == 1 {
             withAnimation(.easeOut(duration: 0.22)) {
                 bookmarksExpandedRaw = true
@@ -1491,6 +1531,9 @@ struct ContentView: View {
                 return
             }
         }
+        currentBookmarkID = bookmark.id
+        placeholderIsCurrent = false
+        bookmarkNavInProgress = true
         jumpTo(
             path: bookmark.path,
             blockIndex: bookmark.blockIndex,
@@ -1539,6 +1582,13 @@ struct ContentView: View {
             blockIndex: block,
             blockFingerprint: fp
         )
+        placeholderIsCurrent = true
+        currentBookmarkID = nil
+        // Make sure the user actually sees the row that just appeared.
+        withAnimation(.easeOut(duration: 0.22)) {
+            bookmarksExpandedRaw = true
+            inspectorVisible = true
+        }
     }
 
     /// ⌘0: jump to the placeholder if one is set; beep otherwise.
@@ -1547,6 +1597,9 @@ struct ContentView: View {
             NSSound.beep()
             return
         }
+        placeholderIsCurrent = true
+        currentBookmarkID = nil
+        bookmarkNavInProgress = true
         jumpTo(path: p.path, blockIndex: p.blockIndex, fingerprint: p.blockFingerprint)
     }
 
