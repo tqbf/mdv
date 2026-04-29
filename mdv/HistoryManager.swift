@@ -18,6 +18,10 @@ class HistoryManager: ObservableObject {
 
     init() {
         load()
+        // Bring the FTS index into sync with what's on disk for any entries
+        // that pre-date the search feature, or files that have been edited
+        // since they were last opened. Mtime-aware, so it's cheap.
+        Database.shared.reindex(paths: entries.map { $0.path })
     }
 
     @discardableResult
@@ -33,17 +37,21 @@ class HistoryManager: ObservableObject {
         }
 
         save()
+        Database.shared.indexFile(at: path)
         return entry
     }
 
     func remove(_ entry: HistoryEntry) {
         entries.removeAll { $0.id == entry.id }
         save()
+        Database.shared.removeFile(at: entry.path)
     }
 
     func clear() {
+        let removed = entries.map { $0.path }
         entries.removeAll()
         save()
+        for p in removed { Database.shared.removeFile(at: p) }
     }
 
     private func save() {
