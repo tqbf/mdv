@@ -29,7 +29,6 @@ struct ContentView: View {
     @AppStorage("mdv_bookmarks_expanded") private var bookmarksExpandedRaw: Bool = false
     @State private var bookmarksDividerHovered = false
     @State private var hoveredBookmark: Int64? = nil
-    @State private var draggingBookmarkID: Int64? = nil
     @State private var dropTargetBookmarkID: Int64? = nil
     @State private var hoveredPlaceholder = false
 
@@ -1012,9 +1011,9 @@ struct ContentView: View {
     private var bookmarksList: some View {
         // ScrollView + LazyVStack instead of List because SwiftUI List on macOS
         // doesn't fire .onMove from a plain mouse drag without an explicit drag
-        // handle in the row. Hand-rolled .onDrag/.onDrop gives us mouse-drag
-        // reordering with a row-shaped drag preview, which is what the user
-        // expects when they grab a bookmark to push it into a hotkey slot.
+        // handle in the row. We use .draggable/.dropDestination (macOS 13+)
+        // rather than .onDrag/.onDrop because the latter combo is broken on
+        // macOS 14.x — drags from a Button don't fire reliably.
         ScrollView {
             LazyVStack(spacing: 1) {
                 if let p = placeholder {
@@ -1050,29 +1049,25 @@ struct ContentView: View {
                                 Text("Remove Bookmark")
                             }
                         }
-                        .onDrag {
-                            draggingBookmarkID = bookmark.id
-                            return NSItemProvider(object: "mdv-bookmark:\(bookmark.id)" as NSString)
+                        .draggable("mdv-bookmark:\(bookmark.id)") {
+                            bookmarkRow(bookmark)
+                                .frame(width: inspectorWidth - 12)
                         }
-                        .onDrop(
-                            of: [.text],
-                            delegate: BookmarkDropDelegate(
-                                target: bookmark,
-                                manager: bookmarks,
-                                hovered: $dropTargetBookmarkID,
-                                dragging: $draggingBookmarkID
-                            )
-                        )
+                        .dropDestination(for: String.self) { items, _ in
+                            handleBookmarkDrop(items, targetID: bookmark.id)
+                        } isTargeted: { hovering in
+                            if hovering {
+                                dropTargetBookmarkID = bookmark.id
+                            } else if dropTargetBookmarkID == bookmark.id {
+                                dropTargetBookmarkID = nil
+                            }
+                        }
                 }
                 Color.clear
                     .frame(height: 24)
-                    .onDrop(
-                        of: [.text],
-                        delegate: BookmarkDropTailDelegate(
-                            manager: bookmarks,
-                            dragging: $draggingBookmarkID
-                        )
-                    )
+                    .dropDestination(for: String.self) { items, _ in
+                        handleBookmarkDrop(items, targetID: nil)
+                    }
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
@@ -1142,7 +1137,6 @@ struct ContentView: View {
         let slot = bookmarks.slotIndex(for: bookmark.id)
         let missing = !bookmark.fileExists
         let hovered = hoveredBookmark == bookmark.id
-        let dragging = draggingBookmarkID == bookmark.id
         let dropHover = dropTargetBookmarkID == bookmark.id
         let isCurrent = currentBookmarkID == bookmark.id
         let filename = URL(fileURLWithPath: bookmark.path).lastPathComponent
@@ -1178,7 +1172,7 @@ struct ContentView: View {
                     hotkeyBadge(n, onAccent: isCurrent)
                 }
             }
-            .opacity(missing && !isCurrent ? 0.6 : (dragging ? 0.4 : 1.0))
+            .opacity(missing && !isCurrent ? 0.6 : 1.0)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1599,6 +1593,22 @@ struct ContentView: View {
         loadBookmark(bookmark)
     }
 
+    /// Parse a dropped "mdv-bookmark:<id>" payload and reorder. `targetID == nil`
+    /// means the drop landed on the tail spacer below the last row.
+    private func handleBookmarkDrop(_ items: [String], targetID: Int64?) -> Bool {
+        defer { dropTargetBookmarkID = nil }
+        guard let str = items.first else { return false }
+        let parts = str.components(separatedBy: ":")
+        guard parts.count == 2, parts[0] == "mdv-bookmark", let id = Int64(parts[1]) else { return false }
+        if let targetID = targetID,
+           let dest = bookmarks.bookmarks.firstIndex(where: { $0.id == targetID }) {
+            bookmarks.moveBookmark(id: id, toIndex: dest)
+        } else {
+            bookmarks.moveBookmarkToEnd(id: id)
+        }
+        return true
+    }
+
     /// Common path for navigating to (path, anchor) — used by saved bookmarks
     /// and by the ⌘0 placeholder. If `path` matches the currently-loaded file
     /// we skip the reload and just scroll.
@@ -1675,78 +1685,6 @@ struct ContentView: View {
             guard ["md", "markdown", "txt", "mdown", "mkd"].contains(ext) else { return }
             DispatchQueue.main.async {
                 loadFile(url)
-            }
-        }
-        return true
-    }
-}
-
-// MARK: - Bookmark drag-drop
-
-/// Handles drops onto a specific bookmark row — the dragged bookmark is moved
-/// to that target row's index. Tail drops (past the last row) are handled by
-/// `BookmarkDropTailDelegate` because a row delegate can't see "below the list."
-private struct BookmarkDropDelegate: DropDelegate {
-    let target: Bookmark
-    let manager: BookmarksManager
-    @Binding var hovered: Int64?
-    @Binding var dragging: Int64?
-
-    func validateDrop(info: DropInfo) -> Bool { true }
-
-    func dropEntered(info: DropInfo) {
-        // Don't show a drop indicator on the row being dragged (no-op move).
-        if let dragging, dragging == target.id {
-            hovered = nil
-        } else {
-            hovered = target.id
-        }
-    }
-
-    func dropExited(info: DropInfo) {
-        if hovered == target.id { hovered = nil }
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
-        defer {
-            hovered = nil
-            dragging = nil
-        }
-        guard let provider = info.itemProviders(for: [.text]).first else { return false }
-        let mgr = manager
-        let targetID = target.id
-        provider.loadObject(ofClass: NSString.self) { item, _ in
-            guard let str = item as? String else { return }
-            // Payload format: "mdv-bookmark:<id>"
-            let parts = str.components(separatedBy: ":")
-            guard parts.count == 2, parts[0] == "mdv-bookmark", let id = Int64(parts[1]) else { return }
-            DispatchQueue.main.async {
-                guard let dest = mgr.bookmarks.firstIndex(where: { $0.id == targetID }) else { return }
-                mgr.moveBookmark(id: id, toIndex: dest)
-            }
-        }
-        return true
-    }
-}
-
-/// Drop target for the spacer below the last bookmark — sends the dragged item
-/// to the very end of the list.
-private struct BookmarkDropTailDelegate: DropDelegate {
-    let manager: BookmarksManager
-    @Binding var dragging: Int64?
-
-    func validateDrop(info: DropInfo) -> Bool { true }
-
-    func performDrop(info: DropInfo) -> Bool {
-        defer { dragging = nil }
-        guard let provider = info.itemProviders(for: [.text]).first else { return false }
-        let mgr = manager
-        provider.loadObject(ofClass: NSString.self) { item, _ in
-            guard let str = item as? String else { return }
-            let parts = str.components(separatedBy: ":")
-            guard parts.count == 2, parts[0] == "mdv-bookmark", let id = Int64(parts[1]) else { return }
-            DispatchQueue.main.async {
-                mgr.moveBookmarkToEnd(id: id)
             }
         }
         return true
