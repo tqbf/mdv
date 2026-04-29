@@ -5,6 +5,7 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject var history: HistoryManager
     @EnvironmentObject var bookmarks: BookmarksManager
+    @EnvironmentObject var themes: ThemeManager
     let initialURL: URL?
 
     init(initialURL: URL? = nil) {
@@ -188,6 +189,9 @@ struct ContentView: View {
                 .help("Open file (⌘O)")
             }
             ToolbarItem(placement: .primaryAction) {
+                themeMenu
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     addBookmarkAtCurrentSpot()
                 } label: {
@@ -318,7 +322,10 @@ struct ContentView: View {
                 historyList
             }
         }
-        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+        .background(
+            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                .overlay(themes.current.sidebarTint.opacity(themes.current.sidebarTintOpacity))
+        )
     }
 
     private var historyList: some View {
@@ -635,6 +642,34 @@ struct ContentView: View {
         return path
     }
 
+    // MARK: - Theme Menu (toolbar)
+
+    /// Toolbar pop-up menu for switching the document theme. Shows a paintpalette
+    /// icon (no label) so it stays visually unobtrusive next to the other toolbar
+    /// glyphs; the popup itself shows full theme names with a checkmark on the
+    /// active one. Selection persists via ThemeManager (@AppStorage).
+    private var themeMenu: some View {
+        Menu {
+            ForEach(MDVTheme.all) { theme in
+                Button {
+                    themes.set(theme)
+                } label: {
+                    if themes.current.id == theme.id {
+                        Label(theme.name, systemImage: "checkmark")
+                    } else {
+                        Text(theme.name)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "paintpalette")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Theme: \(themes.current.name)")
+    }
+
     // MARK: - Drag Handle
 
     private var dragHandle: some View {
@@ -672,7 +707,7 @@ struct ContentView: View {
                         LazyVStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { (idx, block) in
                                 Markdown(block)
-                                    .markdownTheme(.gitHub)
+                                    .markdownTheme(themes.current.markdownTheme)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(
@@ -689,7 +724,7 @@ struct ContentView: View {
                                         // read-only viewer has no insertion caret.
                                         if hoveredBlock == idx && highlightColor(forBlock: idx) == .clear {
                                             Rectangle()
-                                                .fill(Color.accentColor)
+                                                .fill(themes.current.accent)
                                                 .frame(width: 2)
                                                 .padding(.vertical, 1)
                                                 .transition(.opacity)
@@ -711,9 +746,11 @@ struct ContentView: View {
                             }
                         }
                         .textSelection(.enabled)
-                        .padding(.horizontal, 34)
+                        .padding(.horizontal, themes.current.articleHorizontalPadding)
                         .padding(.vertical, 28)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(maxWidth: themes.current.articleMaxWidth ?? .infinity, alignment: .leading)
+                        .frame(maxWidth: .infinity,
+                               alignment: themes.current.articleMaxWidth == nil ? .leading : .center)
                     }
                     .onChange(of: currentMatchIndex) { _ in
                         scrollToCurrentMatch(proxy: proxy)
@@ -741,7 +778,8 @@ struct ContentView: View {
                 }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(themes.current.background)
+        .environment(\.colorScheme, themes.current.isDark ? .dark : .light)
         .overlay(alignment: .top) {
             if isSearching {
                 findBar
@@ -827,7 +865,10 @@ struct ContentView: View {
                 }
             }
         }
-        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+        .background(
+            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                .overlay(themes.current.sidebarTint.opacity(themes.current.sidebarTintOpacity))
+        )
     }
 
     private func clampedBookmarksHeight(total: CGFloat) -> CGFloat {
@@ -1332,7 +1373,7 @@ struct ContentView: View {
     private func blockBackground(forBlock idx: Int) -> Color {
         let find = highlightColor(forBlock: idx)
         if find != .clear { return find }
-        if hoveredBlock == idx { return Color.accentColor.opacity(0.07) }
+        if hoveredBlock == idx { return themes.current.accent.opacity(0.07) }
         return .clear
     }
 

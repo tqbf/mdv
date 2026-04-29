@@ -5,13 +5,23 @@ import AppKit
 struct mdvApp: App {
     @StateObject private var history = HistoryManager()
     @StateObject private var bookmarks = BookmarksManager()
+    @StateObject private var themes = ThemeManager()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    init() {
+        // Register the bundled Alegreya weights into the process-local font
+        // space before any view hierarchy resolves a custom font name. Done
+        // once at App init so SwiftUI's Font.custom("Alegreya", ...) resolves
+        // for every window we open.
+        FontRegistration.registerBundledFonts()
+    }
 
     var body: some Scene {
         Window("mdv", id: "main") {
             ContentView()
                 .environmentObject(history)
                 .environmentObject(bookmarks)
+                .environmentObject(themes)
                 .frame(minWidth: 760, minHeight: 520)
         }
         .defaultSize(width: 1080, height: 720)
