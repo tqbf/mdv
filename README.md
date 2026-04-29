@@ -1,5 +1,5 @@
 
-![Mdv](MDV.png)
+<img src="MDV.png" alt="mdv" width="320">
 
 ## Mdv: a macOS native Markdown viewer.
 
