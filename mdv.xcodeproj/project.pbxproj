@@ -15,6 +15,13 @@
 		AA000007 /* Database.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000007; };
 		AA000008 /* BookmarksManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000008; };
 		AA000009 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000009; };
+		AA000020 /* FontRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000020; };
+		AA000021 /* Alegreya-Regular.otf in Resources */ = {isa = PBXBuildFile; fileRef = AB000021; };
+		AA000022 /* Alegreya-Italic.otf in Resources */ = {isa = PBXBuildFile; fileRef = AB000022; };
+		AA000023 /* Alegreya-Medium.otf in Resources */ = {isa = PBXBuildFile; fileRef = AB000023; };
+		AA000024 /* Alegreya-Bold.otf in Resources */ = {isa = PBXBuildFile; fileRef = AB000024; };
+		AA000025 /* Alegreya-BoldItalic.otf in Resources */ = {isa = PBXBuildFile; fileRef = AB000025; };
+		AA000026 /* Alegreya-ExtraBold.otf in Resources */ = {isa = PBXBuildFile; fileRef = AB000026; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +34,13 @@
 		AB000007 /* Database.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Database.swift; sourceTree = "<group>"; };
 		AB000008 /* BookmarksManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarksManager.swift; sourceTree = "<group>"; };
 		AB000009 /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
+		AB000020 /* FontRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FontRegistration.swift; sourceTree = "<group>"; };
+		AB000021 /* Alegreya-Regular.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/Alegreya-Regular.otf"; sourceTree = "<group>"; };
+		AB000022 /* Alegreya-Italic.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/Alegreya-Italic.otf"; sourceTree = "<group>"; };
+		AB000023 /* Alegreya-Medium.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/Alegreya-Medium.otf"; sourceTree = "<group>"; };
+		AB000024 /* Alegreya-Bold.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/Alegreya-Bold.otf"; sourceTree = "<group>"; };
+		AB000025 /* Alegreya-BoldItalic.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/Alegreya-BoldItalic.otf"; sourceTree = "<group>"; };
+		AB000026 /* Alegreya-ExtraBold.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/Alegreya-ExtraBold.otf"; sourceTree = "<group>"; };
 		AB000010 /* mdv.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = mdv.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -47,6 +61,12 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA000005 /* AppIcon.icns in Resources */,
+				AA000021 /* Alegreya-Regular.otf in Resources */,
+				AA000022 /* Alegreya-Italic.otf in Resources */,
+				AA000023 /* Alegreya-Medium.otf in Resources */,
+				AA000024 /* Alegreya-Bold.otf in Resources */,
+				AA000025 /* Alegreya-BoldItalic.otf in Resources */,
+				AA000026 /* Alegreya-ExtraBold.otf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -70,6 +90,13 @@
 				AB000007 /* Database.swift */,
 				AB000008 /* BookmarksManager.swift */,
 				AB000009 /* ThemeManager.swift */,
+				AB000020 /* FontRegistration.swift */,
+				AB000021 /* Alegreya-Regular.otf */,
+				AB000022 /* Alegreya-Italic.otf */,
+				AB000023 /* Alegreya-Medium.otf */,
+				AB000024 /* Alegreya-Bold.otf */,
+				AB000025 /* Alegreya-BoldItalic.otf */,
+				AB000026 /* Alegreya-ExtraBold.otf */,
 				AB000004 /* Info.plist */,
 				AB000005 /* mdv.entitlements */,
 				AB000006 /* AppIcon.icns */,
@@ -150,6 +177,7 @@
 				AA000007 /* Database.swift in Sources */,
 				AA000008 /* BookmarksManager.swift in Sources */,
 				AA000009 /* ThemeManager.swift in Sources */,
+				AA000020 /* FontRegistration.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

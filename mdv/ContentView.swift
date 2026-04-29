@@ -746,7 +746,7 @@ struct ContentView: View {
                             }
                         }
                         .textSelection(.enabled)
-                        .padding(.horizontal, 34)
+                        .padding(.horizontal, themes.current.articleHorizontalPadding)
                         .padding(.vertical, 28)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }

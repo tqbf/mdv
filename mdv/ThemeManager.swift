@@ -29,6 +29,24 @@ struct MDVTheme: Identifiable, Hashable {
     /// current theme without drowning out the system look. Kept at low opacity.
     let sidebarTint: Color
     let sidebarTintOpacity: Double
+
+    // MARK: Typography
+
+    /// Font family for body text, headings, blockquote, etc. Code blocks
+    /// always use the system monospace regardless of this setting.
+    var bodyFontFamily: FontProperties.Family = .system()
+    /// Default `Theme.gitHub` uses 16pt body. Reading-tuned themes can bump
+    /// this up — Alegreya's x-height is generous so 17pt feels equivalent
+    /// to system 16pt while easing eye fatigue on long texts.
+    var baseFontSize: CGFloat = 16
+    /// Extra leading between lines, in em-relative units. MarkdownUI's gitHub
+    /// theme uses 0.25em — that's tight for serif body. Long-form serif reading
+    /// wants 0.4–0.5em on top of the natural ~1.2 line height.
+    var paragraphLineSpacingEm: CGFloat = 0.25
+    /// Horizontal padding around the rendered article. Theme-controlled so a
+    /// reading theme can set a measure (line length) closer to the optimum
+    /// 60–75 characters.
+    var articleHorizontalPadding: CGFloat = 34
 }
 
 extension MDVTheme {
@@ -47,11 +65,16 @@ extension MDVTheme {
         let head = self.heading
         let strong = self.strong
 
+        let family = self.bodyFontFamily
+        let bodySize = self.baseFontSize
+        let lineEm = self.paragraphLineSpacingEm
+
         return Theme()
             .text {
+                FontFamily(family)
                 ForegroundColor(txt)
                 BackgroundColor(bg)
-                FontSize(16)
+                FontSize(bodySize)
             }
             .code {
                 FontFamilyVariant(.monospaced)
@@ -135,7 +158,7 @@ extension MDVTheme {
             .paragraph { configuration in
                 configuration.label
                     .fixedSize(horizontal: false, vertical: true)
-                    .relativeLineSpacing(.em(0.25))
+                    .relativeLineSpacing(.em(lineEm))
                     .markdownMargin(top: 0, bottom: 16)
             }
             .blockquote { configuration in
@@ -261,6 +284,35 @@ extension MDVTheme {
         sidebarTintOpacity: 0.55
     )
 
+    /// Long-form reading theme using bundled Alegreya (a Spanish-tradition
+    /// serif designed by Juan Pablo del Peral, optimized for sustained text).
+    /// Warm parchment background — pure white tires the eyes — with deep
+    /// cordovan-brown text and azulejo-blue links. Body is bumped to 17pt
+    /// with generous leading; the article column stays narrower than the
+    /// other themes for a comfortable measure (60–75ch).
+    static let sevilla = MDVTheme(
+        id: "sevilla",
+        name: "Sevilla",
+        isDark: false,
+        background: Color(rgba: 0xF8F1DEFF),         // warm parchment cream
+        secondaryBackground: Color(rgba: 0xEFE6CCFF), // deeper parchment for code blocks
+        text: Color(rgba: 0x2D241BFF),               // warm dark brown
+        secondaryText: Color(rgba: 0x5C4F3FFF),
+        tertiaryText: Color(rgba: 0x8C7E69FF),
+        heading: Color(rgba: 0x3D2014FF),            // cordovan / Spanish leather
+        link: Color(rgba: 0x2C5F8DFF),               // muted azulejo blue
+        strong: Color(rgba: 0x2D241BFF),
+        border: Color(rgba: 0xDCCFA6FF),
+        divider: Color(rgba: 0xDCCFA6FF),
+        blockquoteBar: Color(rgba: 0xB0623EFF),      // terracotta
+        sidebarTint: Color(rgba: 0xF8F1DEFF),
+        sidebarTintOpacity: 0.55,
+        bodyFontFamily: .custom("Alegreya"),
+        baseFontSize: 17,
+        paragraphLineSpacingEm: 0.45,                // generous leading for serif comfort
+        articleHorizontalPadding: 56                 // narrower measure → ~65ch at body 17pt
+    )
+
     static let solarizedDark = MDVTheme(
         id: "solarized-dark",
         name: "Solarized Dark",
@@ -323,6 +375,7 @@ extension MDVTheme {
 
     static let all: [MDVTheme] = [
         .highContrast,
+        .sevilla,
         .charcoal,
         .solarizedLight,
         .solarizedDark,
