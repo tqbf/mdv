@@ -5,6 +5,7 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject var history: HistoryManager
     @EnvironmentObject var bookmarks: BookmarksManager
+    @EnvironmentObject var themes: ThemeManager
     let initialURL: URL?
 
     init(initialURL: URL? = nil) {
@@ -188,6 +189,9 @@ struct ContentView: View {
                 .help("Open file (⌘O)")
             }
             ToolbarItem(placement: .primaryAction) {
+                themeMenu
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Button {
                     addBookmarkAtCurrentSpot()
                 } label: {
@@ -318,7 +322,10 @@ struct ContentView: View {
                 historyList
             }
         }
-        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+        .background(
+            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                .overlay(themes.current.sidebarTint.opacity(themes.current.sidebarTintOpacity))
+        )
     }
 
     private var historyList: some View {
@@ -635,6 +642,34 @@ struct ContentView: View {
         return path
     }
 
+    // MARK: - Theme Menu (toolbar)
+
+    /// Toolbar pop-up menu for switching the document theme. Shows a paintpalette
+    /// icon (no label) so it stays visually unobtrusive next to the other toolbar
+    /// glyphs; the popup itself shows full theme names with a checkmark on the
+    /// active one. Selection persists via ThemeManager (@AppStorage).
+    private var themeMenu: some View {
+        Menu {
+            ForEach(MDVTheme.all) { theme in
+                Button {
+                    themes.set(theme)
+                } label: {
+                    if themes.current.id == theme.id {
+                        Label(theme.name, systemImage: "checkmark")
+                    } else {
+                        Text(theme.name)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "paintpalette")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Theme: \(themes.current.name)")
+    }
+
     // MARK: - Drag Handle
 
     private var dragHandle: some View {
@@ -672,7 +707,7 @@ struct ContentView: View {
                         LazyVStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { (idx, block) in
                                 Markdown(block)
-                                    .markdownTheme(.gitHub)
+                                    .markdownTheme(themes.current.markdownTheme)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(
@@ -741,7 +776,8 @@ struct ContentView: View {
                 }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(themes.current.background)
+        .environment(\.colorScheme, themes.current.isDark ? .dark : .light)
         .overlay(alignment: .top) {
             if isSearching {
                 findBar
@@ -827,7 +863,10 @@ struct ContentView: View {
                 }
             }
         }
-        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+        .background(
+            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                .overlay(themes.current.sidebarTint.opacity(themes.current.sidebarTintOpacity))
+        )
     }
 
     private func clampedBookmarksHeight(total: CGFloat) -> CGFloat {

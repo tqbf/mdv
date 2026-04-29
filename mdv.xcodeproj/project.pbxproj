@@ -14,6 +14,7 @@
 		AA000005 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = AB000006; };
 		AA000007 /* Database.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000007; };
 		AA000008 /* BookmarksManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000008; };
+		AA000009 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB000009; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -25,6 +26,7 @@
 		AB000006 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
 		AB000007 /* Database.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Database.swift; sourceTree = "<group>"; };
 		AB000008 /* BookmarksManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarksManager.swift; sourceTree = "<group>"; };
+		AB000009 /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
 		AB000010 /* mdv.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = mdv.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -67,6 +69,7 @@
 				AB000003 /* HistoryManager.swift */,
 				AB000007 /* Database.swift */,
 				AB000008 /* BookmarksManager.swift */,
+				AB000009 /* ThemeManager.swift */,
 				AB000004 /* Info.plist */,
 				AB000005 /* mdv.entitlements */,
 				AB000006 /* AppIcon.icns */,
@@ -146,6 +149,7 @@
 				AA000003 /* HistoryManager.swift in Sources */,
 				AA000007 /* Database.swift in Sources */,
 				AA000008 /* BookmarksManager.swift in Sources */,
+				AA000009 /* ThemeManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

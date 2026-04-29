@@ -5,6 +5,7 @@ import AppKit
 struct mdvApp: App {
     @StateObject private var history = HistoryManager()
     @StateObject private var bookmarks = BookmarksManager()
+    @StateObject private var themes = ThemeManager()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
@@ -12,6 +13,7 @@ struct mdvApp: App {
             ContentView()
                 .environmentObject(history)
                 .environmentObject(bookmarks)
+                .environmentObject(themes)
                 .frame(minWidth: 760, minHeight: 520)
         }
         .defaultSize(width: 1080, height: 720)
