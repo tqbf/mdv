@@ -4,6 +4,7 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var history: HistoryManager
+    @EnvironmentObject var bookmarks: BookmarksManager
     let initialURL: URL?
 
     init(initialURL: URL? = nil) {
@@ -15,12 +16,48 @@ struct ContentView: View {
     @State private var sidebarWidth: CGFloat = 240
     @State private var dragHandleHovered = false
 
-    // TOC
-    @State private var tocVisible: Bool = false
+    // TOC + Bookmarks (right inspector)
+    @State private var inspectorVisible: Bool = false
     @State private var tocSelectedBlock: Int? = nil
     @State private var tocScrollTrigger: Int? = nil
     @State private var hoveredHeading: Int? = nil
-    private let tocWidth: CGFloat = 220
+    private let inspectorWidth: CGFloat = 240
+
+    // Bookmarks pane (lives below TOC inside the inspector)
+    @AppStorage("mdv_bookmarks_height") private var bookmarksHeight: Double = 240
+    @AppStorage("mdv_bookmarks_expanded") private var bookmarksExpandedRaw: Bool = false
+    @State private var bookmarksDividerHovered = false
+    @State private var hoveredBookmark: Int64? = nil
+    @State private var draggingBookmarkID: Int64? = nil
+    @State private var dropTargetBookmarkID: Int64? = nil
+    @State private var hoveredPlaceholder = false
+
+    /// Block-indices currently visible in the markdown viewport. Updated via
+    /// each block's .onAppear / .onDisappear. The minimum is the topmost
+    /// visible block, which is what we anchor a new bookmark to.
+    @State private var visibleBlocks: Set<Int> = []
+    /// Block the mouse is currently hovering. Drives the bookmark-anchor
+    /// indicator (subtle accent stripe + tint) so the user can see what
+    /// ⌘D will bookmark — there's no caret in a viewer.
+    @State private var hoveredBlock: Int? = nil
+    /// When non-nil, the markdown view scrolls to this block on next layout.
+    /// Used after loading a file via a bookmark / ⌘0 to land on the anchor.
+    @State private var pendingAnchorBlock: Int? = nil
+    /// Set by jumpTo(...) when the file is being reloaded; consumed once the
+    /// new document's blocks are computed. We can't resolve the fingerprint
+    /// against the document until rawMarkdown updates.
+    @State private var pendingPostLoadAnchor: (blockIndex: Int, fingerprint: String)? = nil
+
+    /// In-memory placeholder slot (⌘0). Holds "the spot I want to flip back to."
+    /// Not persisted — pure per-window navigation state, like Vim's last-jump
+    /// register but bidirectional.
+    struct PlaceholderAnchor: Equatable {
+        let path: String
+        let title: String
+        let blockIndex: Int
+        let blockFingerprint: String
+    }
+    @State private var placeholder: PlaceholderAnchor? = nil
 
     struct TOCHeading: Identifiable {
         let level: Int
@@ -124,14 +161,14 @@ struct ContentView: View {
             markdownView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if tocVisible {
+            if inspectorVisible {
                 Divider()
-                tocSidebar
-                    .frame(width: tocWidth)
+                inspectorPanel
+                    .frame(width: inspectorWidth)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .animation(.easeOut(duration: 0.22), value: tocVisible)
+        .animation(.easeOut(duration: 0.22), value: inspectorVisible)
         .navigationTitle(selectedEntry?.filename ?? "mdv")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -142,14 +179,24 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    tocVisible.toggle()
+                    addBookmarkAtCurrentSpot()
                 } label: {
-                    Image(systemName: tocVisible ? "sidebar.right" : "sidebar.right")
-                        .foregroundStyle(tocVisible ? Color.accentColor : Color.primary)
+                    Image(systemName: hasAnyBookmarkForCurrentFile ? "bookmark.fill" : "bookmark")
+                        .foregroundStyle(hasAnyBookmarkForCurrentFile ? Color.accentColor : Color.primary)
                 }
-                .help("Toggle Outline (⌥⌘0)")
+                .help("Bookmark Current Spot (⌘D)")
+                .disabled(selectedEntry == nil)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    inspectorVisible.toggle()
+                    if inspectorVisible { bookmarks.refreshFileExistence() }
+                } label: {
+                    Image(systemName: "sidebar.right")
+                        .foregroundStyle(inspectorVisible ? Color.accentColor : Color.primary)
+                }
+                .help("Toggle Inspector (⌥⌘0)")
                 .keyboardShortcut("0", modifiers: [.command, .option])
-                .disabled(tocHeadings.isEmpty)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .openFile)) { _ in
@@ -173,6 +220,15 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .searchHistory)) { _ in
             focusGlobalSearch()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleBookmark)) { _ in
+            addBookmarkAtCurrentSpot()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openBookmarkSlot)) { notif in
+            if let n = notif.object as? Int { openBookmarkSlot(n) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .togglePlaceholder)) { _ in
+            togglePlaceholder()
+        }
         .onOpenURL { url in
             loadFile(url)
         }
@@ -184,6 +240,21 @@ struct ContentView: View {
         }
         .onChange(of: rawMarkdown) { _ in
             if isSearching { recomputeMatches() }
+            // Visible-block tracking is per-document; reset so the topmost-visible
+            // calculation doesn't use indices from the previous file before its
+            // blocks finish disappearing.
+            visibleBlocks.removeAll()
+            // If we got here via jumpTo() with a pending anchor, resolve it now
+            // that the new document's blocks exist.
+            if let anchor = pendingPostLoadAnchor {
+                let resolved = resolveBookmarkAnchor(
+                    blocks: blocks,
+                    storedIndex: anchor.blockIndex,
+                    fingerprint: anchor.fingerprint
+                )
+                pendingPostLoadAnchor = nil
+                pendingAnchorBlock = resolved
+            }
         }
         .onChange(of: isSearching) { active in
             if active {
@@ -586,12 +657,37 @@ struct ContentView: View {
                                     .padding(.vertical, 2)
                                     .background(
                                         RoundedRectangle(cornerRadius: 4)
-                                            .fill(highlightColor(forBlock: idx))
+                                            .fill(blockBackground(forBlock: idx))
                                             .animation(.easeOut(duration: 0.18), value: currentMatchIndex)
                                             .animation(.easeOut(duration: 0.18), value: matches)
                                             .animation(.easeOut(duration: 0.18), value: isSearching)
+                                            .animation(.easeOut(duration: 0.12), value: hoveredBlock)
                                     )
+                                    .overlay(alignment: .leading) {
+                                        // Accent stripe along the left edge of the hovered block —
+                                        // this is the "you will bookmark here" affordance, since a
+                                        // read-only viewer has no insertion caret.
+                                        if hoveredBlock == idx && highlightColor(forBlock: idx) == .clear {
+                                            Rectangle()
+                                                .fill(Color.accentColor)
+                                                .frame(width: 2)
+                                                .padding(.vertical, 1)
+                                                .transition(.opacity)
+                                        }
+                                    }
                                     .id("block-\(idx)")
+                                    .onAppear { visibleBlocks.insert(idx) }
+                                    .onDisappear {
+                                        visibleBlocks.remove(idx)
+                                        if hoveredBlock == idx { hoveredBlock = nil }
+                                    }
+                                    .onHover { inside in
+                                        if inside {
+                                            hoveredBlock = idx
+                                        } else if hoveredBlock == idx {
+                                            hoveredBlock = nil
+                                        }
+                                    }
                             }
                         }
                         .textSelection(.enabled)
@@ -609,6 +705,17 @@ struct ContentView: View {
                         }
                         DispatchQueue.main.async {
                             tocScrollTrigger = nil
+                        }
+                    }
+                    .onChange(of: pendingAnchorBlock) { newValue in
+                        guard let target = newValue else { return }
+                        // The blocks may not all be laid out yet on first paint —
+                        // give SwiftUI a tick before scrolling.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                proxy.scrollTo("block-\(target)", anchor: .top)
+                            }
+                            pendingAnchorBlock = nil
                         }
                     }
                 }
@@ -680,7 +787,67 @@ struct ContentView: View {
         return out.trimmingCharacters(in: .whitespaces)
     }
 
-    private var tocSidebar: some View {
+    // MARK: - Right inspector (TOC + Bookmarks)
+
+    private var inspectorPanel: some View {
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                tocPane
+                    .frame(maxHeight: .infinity)
+
+                if bookmarksExpandedRaw {
+                    inspectorDivider(totalHeight: geo.size.height)
+                }
+
+                bookmarksHeader
+
+                if bookmarksExpandedRaw {
+                    bookmarksContent
+                        .frame(height: clampedBookmarksHeight(total: geo.size.height))
+                }
+            }
+        }
+        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+    }
+
+    private func clampedBookmarksHeight(total: CGFloat) -> CGFloat {
+        let header: CGFloat = 32
+        let minToc: CGFloat = 80
+        let minBookmarks: CGFloat = 120
+        let maxBookmarks = max(minBookmarks, total - minToc - header - 8)
+        return min(max(CGFloat(bookmarksHeight), minBookmarks), maxBookmarks)
+    }
+
+    private func inspectorDivider(totalHeight: CGFloat) -> some View {
+        ZStack {
+            // 12pt-tall transparent hit-target so the divider is comfortably grabbable.
+            // The visible 1pt rule is centered inside it.
+            Color.clear
+                .frame(height: 12)
+                .contentShape(Rectangle())
+            Rectangle()
+                .fill(bookmarksDividerHovered ? Color.accentColor.opacity(0.5) : Color.black.opacity(0.08))
+                .frame(height: bookmarksDividerHovered ? 2 : 1)
+                .animation(.easeInOut(duration: 0.15), value: bookmarksDividerHovered)
+        }
+        .onHover { inside in
+            bookmarksDividerHovered = inside
+            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let header: CGFloat = 32
+                    let minToc: CGFloat = 80
+                    let minBookmarks: CGFloat = 120
+                    let maxBookmarks = max(minBookmarks, totalHeight - minToc - header - 8)
+                    let proposed = CGFloat(bookmarksHeight) - value.translation.height
+                    bookmarksHeight = Double(min(max(proposed, minBookmarks), maxBookmarks))
+                }
+        )
+    }
+
+    private var tocPane: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 Text("On this page")
@@ -718,7 +885,253 @@ struct ContentView: View {
                 }
             }
         }
-        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+    }
+
+    // MARK: - Bookmarks pane
+
+    private var bookmarksHeader: some View {
+        HStack(spacing: 6) {
+            Image(systemName: bookmarksExpandedRaw ? "chevron.down" : "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 10)
+            Text("Bookmarks")
+                .font(.system(size: 11, weight: .semibold))
+                .textCase(.uppercase)
+                .tracking(0.6)
+                .foregroundStyle(.tertiary)
+            Spacer()
+            if !bookmarks.bookmarks.isEmpty {
+                Text("\(bookmarks.bookmarks.count)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        Capsule().fill(Color.primary.opacity(0.06))
+                    )
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .frame(height: 32)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.easeOut(duration: 0.18)) {
+                bookmarksExpandedRaw.toggle()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var bookmarksContent: some View {
+        if bookmarks.bookmarks.isEmpty && placeholder == nil {
+            VStack(spacing: 8) {
+                Spacer(minLength: 8)
+                Image(systemName: "bookmark")
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundStyle(.tertiary)
+                Text("No bookmarks")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text("Press").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    keyCap("⌘"); keyCap("D")
+                    Text("at a spot in any file").font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 8)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            bookmarksList
+        }
+    }
+
+    private var bookmarksList: some View {
+        // ScrollView + LazyVStack instead of List because SwiftUI List on macOS
+        // doesn't fire .onMove from a plain mouse drag without an explicit drag
+        // handle in the row. Hand-rolled .onDrag/.onDrop gives us mouse-drag
+        // reordering with a row-shaped drag preview, which is what the user
+        // expects when they grab a bookmark to push it into a hotkey slot.
+        ScrollView {
+            LazyVStack(spacing: 1) {
+                if let p = placeholder {
+                    placeholderRow(p)
+                        .padding(.bottom, 2)
+                    Divider()
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                }
+
+                ForEach(bookmarks.bookmarks) { bookmark in
+                    bookmarkRow(bookmark)
+                        .contextMenu {
+                            Button("Go to Bookmark") { loadBookmark(bookmark) }
+                                .disabled(!bookmark.fileExists)
+                            Button("Reveal in Finder") {
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: bookmark.path)])
+                            }
+                            .disabled(!bookmark.fileExists)
+                            Divider()
+                            Button(role: .destructive) {
+                                bookmarks.remove(id: bookmark.id)
+                            } label: {
+                                Text("Remove Bookmark")
+                            }
+                        }
+                        .onDrag {
+                            draggingBookmarkID = bookmark.id
+                            return NSItemProvider(object: "mdv-bookmark:\(bookmark.id)" as NSString)
+                        }
+                        .onDrop(
+                            of: [.text],
+                            delegate: BookmarkDropDelegate(
+                                target: bookmark,
+                                manager: bookmarks,
+                                hovered: $dropTargetBookmarkID,
+                                dragging: $draggingBookmarkID
+                            )
+                        )
+                }
+                Color.clear
+                    .frame(height: 24)
+                    .onDrop(
+                        of: [.text],
+                        delegate: BookmarkDropTailDelegate(
+                            manager: bookmarks,
+                            dragging: $draggingBookmarkID
+                        )
+                    )
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func placeholderRow(_ p: PlaceholderAnchor) -> some View {
+        let missing = !FileManager.default.fileExists(atPath: p.path)
+        return Button {
+            togglePlaceholder()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(missing ? Color.orange : Color.accentColor)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(p.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(missing ? Color.secondary : Color.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(URL(fileURLWithPath: p.path).lastPathComponent)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                hotkeyBadge(0, onAccent: false)
+            }
+            .opacity(missing ? 0.6 : 1.0)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(hoveredPlaceholder ? Color.primary.opacity(0.06) : Color.accentColor.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(Color.accentColor.opacity(0.25), lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            hoveredPlaceholder = inside
+        }
+        .help("Placeholder (⌘0): swap back here")
+        .contextMenu {
+            Button("Clear Placeholder") { placeholder = nil }
+        }
+    }
+
+    private func bookmarkRow(_ bookmark: Bookmark) -> some View {
+        let slot = bookmarks.slotIndex(for: bookmark.id)
+        let missing = !bookmark.fileExists
+        let hovered = hoveredBookmark == bookmark.id
+        let dragging = draggingBookmarkID == bookmark.id
+        let dropHover = dropTargetBookmarkID == bookmark.id
+        let filename = URL(fileURLWithPath: bookmark.path).lastPathComponent
+
+        return Button {
+            loadBookmark(bookmark)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: missing ? "exclamationmark.triangle.fill" : "bookmark.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(missing ? Color.orange : Color.accentColor.opacity(0.7))
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(bookmark.title.isEmpty ? "(unnamed)" : bookmark.title)
+                        .font(.system(size: 13))
+                        .foregroundStyle(missing ? Color.secondary : Color.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(filename)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                if let n = slot {
+                    hotkeyBadge(n, onAccent: false)
+                }
+            }
+            .opacity(missing ? 0.6 : (dragging ? 0.4 : 1.0))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(
+                        dropHover ? Color.accentColor.opacity(0.18) :
+                        (hovered ? Color.primary.opacity(0.06) : Color.clear)
+                    )
+            )
+            .overlay(alignment: .top) {
+                if dropHover {
+                    Rectangle()
+                        .fill(Color.accentColor)
+                        .frame(height: 2)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            hoveredBookmark = inside ? bookmark.id : nil
+        }
+    }
+
+    private func hotkeyBadge(_ n: Int, onAccent: Bool) -> some View {
+        HStack(spacing: 0) {
+            Text("⌘")
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+            Text("\(n)")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .monospacedDigit()
+        }
+        .foregroundStyle(onAccent ? Color.accentColor : Color.white)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(onAccent ? Color.white : Color.accentColor.opacity(0.85))
+        )
     }
 
     private func tocRow(_ heading: TOCHeading) -> some View {
@@ -876,6 +1289,15 @@ struct ContentView: View {
         return .clear
     }
 
+    /// Background fill for a markdown block. Find highlights win over hover so
+    /// search-in-progress feedback isn't drowned out by mouse position.
+    private func blockBackground(forBlock idx: Int) -> Color {
+        let find = highlightColor(forBlock: idx)
+        if find != .clear { return find }
+        if hoveredBlock == idx { return Color.accentColor.opacity(0.07) }
+        return .clear
+    }
+
     private func scrollToCurrentMatch(proxy: ScrollViewProxy) {
         guard matches.indices.contains(currentMatchIndex) else { return }
         let match = matches[currentMatchIndex]
@@ -960,6 +1382,7 @@ struct ContentView: View {
     private func spawnNewWindow(with url: URL) {
         let view = ContentView(initialURL: url)
             .environmentObject(history)
+            .environmentObject(bookmarks)
             .frame(minWidth: 760, minHeight: 520)
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
@@ -976,6 +1399,152 @@ struct ContentView: View {
         guard FileManager.default.isReadableFile(atPath: url.path) else { return }
         let entry = history.add(path: url.path)
         selectedEntry = entry
+    }
+
+    // MARK: - Bookmarks
+
+    private var hasAnyBookmarkForCurrentFile: Bool {
+        guard let path = selectedEntry?.path else { return false }
+        return bookmarks.hasAnyBookmark(forPath: path)
+    }
+
+    /// Index of the topmost block currently visible in the markdown viewport.
+    /// Falls back to 0 if nothing has reported visible yet.
+    private var topVisibleBlock: Int {
+        visibleBlocks.min() ?? 0
+    }
+
+    /// Compute a human-readable title for a block: nearest preceding ATX heading
+    /// if there is one within reach, else the block's own first 40 chars.
+    private func bookmarkTitle(forBlockAt index: Int) -> String {
+        let docBlocks = self.blocks
+        guard !docBlocks.isEmpty else { return "(empty)" }
+        let clamped = max(0, min(index, docBlocks.count - 1))
+        // Walk backwards looking for a heading. Cap the search so we don't
+        // mislabel a deep-in-the-doc bookmark with a very distant section header.
+        let lookback = 40
+        for i in stride(from: clamped, through: max(0, clamped - lookback), by: -1) {
+            let block = docBlocks[i].trimmingCharacters(in: .whitespacesAndNewlines)
+            if block.hasPrefix("```") { continue }
+            let prefix: String?
+            if block.hasPrefix("### ") { prefix = "### " }
+            else if block.hasPrefix("## ") { prefix = "## " }
+            else if block.hasPrefix("# ") { prefix = "# " }
+            else { prefix = nil }
+            if let pfx = prefix {
+                let firstLine = block.components(separatedBy: "\n").first ?? block
+                return stripInlineMarkdown(String(firstLine.dropFirst(pfx.count)))
+            }
+        }
+        // No heading nearby; use the block's own first content line as a label.
+        let block = docBlocks[clamped]
+        let firstLine = block.components(separatedBy: "\n").first ?? block
+        let cleaned = stripInlineMarkdown(firstLine).trimmingCharacters(in: .whitespaces)
+        if cleaned.isEmpty { return "(line \(clamped + 1))" }
+        return String(cleaned.prefix(60))
+    }
+
+    private func currentAnchorTitle() -> String {
+        bookmarkTitle(forBlockAt: topVisibleBlock)
+    }
+
+    private func currentBlockFingerprint() -> String {
+        let docBlocks = self.blocks
+        let idx = max(0, min(topVisibleBlock, docBlocks.count - 1))
+        guard idx < docBlocks.count else { return "" }
+        return bookmarkFingerprint(forBlock: docBlocks[idx])
+    }
+
+    private func addBookmarkAtCurrentSpot() {
+        guard let entry = selectedEntry else { return }
+        // Prefer whatever block the user is currently pointing at. The hover
+        // highlight is the "you'll bookmark here" indicator; if no block is
+        // hovered (e.g. user pressed ⌘D from a non-mouse path), fall back to
+        // the topmost-visible block.
+        let block = hoveredBlock ?? topVisibleBlock
+        let docBlocks = blocks
+        let fp = (block < docBlocks.count) ? bookmarkFingerprint(forBlock: docBlocks[block]) : ""
+        _ = bookmarks.add(
+            path: entry.path,
+            title: bookmarkTitle(forBlockAt: block),
+            blockIndex: block,
+            fingerprint: fp
+        )
+        if bookmarks.bookmarks.count == 1 {
+            withAnimation(.easeOut(duration: 0.22)) {
+                bookmarksExpandedRaw = true
+                inspectorVisible = true
+            }
+        }
+    }
+
+    /// Jump to a bookmark's anchor. If the file is already loaded, just scroll.
+    /// Otherwise reload the file and scroll once it lands.
+    private func loadBookmark(_ bookmark: Bookmark) {
+        if !bookmark.fileExists {
+            bookmarks.refreshFileExistence()
+            guard FileManager.default.fileExists(atPath: bookmark.path) else {
+                NSSound.beep()
+                return
+            }
+        }
+        jumpTo(
+            path: bookmark.path,
+            blockIndex: bookmark.blockIndex,
+            fingerprint: bookmark.blockFingerprint
+        )
+    }
+
+    private func openBookmarkSlot(_ n: Int) {
+        guard let bookmark = bookmarks.bookmark(forSlot: n) else {
+            NSSound.beep()
+            return
+        }
+        loadBookmark(bookmark)
+    }
+
+    /// Common path for navigating to (path, anchor) — used by saved bookmarks
+    /// and by the ⌘0 placeholder. If `path` matches the currently-loaded file
+    /// we skip the reload and just scroll.
+    private func jumpTo(path: String, blockIndex: Int, fingerprint: String) {
+        let url = URL(fileURLWithPath: path)
+        if selectedEntry?.path == path && !rawMarkdown.isEmpty {
+            // Same file; resolve the anchor against the current document and scroll.
+            let resolved = resolveBookmarkAnchor(
+                blocks: blocks,
+                storedIndex: blockIndex,
+                fingerprint: fingerprint
+            )
+            pendingAnchorBlock = resolved
+        } else {
+            // Different file. Stash the anchor; loadFile will trigger a
+            // rawMarkdown change, after which we resolve and scroll.
+            pendingPostLoadAnchor = (blockIndex, fingerprint)
+            loadFile(url)
+        }
+    }
+
+    /// ⌘0: flip between current spot and the placeholder.
+    /// - First press (no placeholder set): captures current as placeholder.
+    /// - Subsequent press: jumps to placeholder while saving current as the new placeholder,
+    ///   so a second ⌘0 brings you back. Pure two-position toggle.
+    private func togglePlaceholder() {
+        guard let entry = selectedEntry else { return }
+        let block = hoveredBlock ?? topVisibleBlock
+        let docBlocks = blocks
+        let fp = (block < docBlocks.count) ? bookmarkFingerprint(forBlock: docBlocks[block]) : ""
+        let current = PlaceholderAnchor(
+            path: entry.path,
+            title: bookmarkTitle(forBlockAt: block),
+            blockIndex: block,
+            blockFingerprint: fp
+        )
+        if let prev = placeholder {
+            placeholder = current
+            jumpTo(path: prev.path, blockIndex: prev.blockIndex, fingerprint: prev.blockFingerprint)
+        } else {
+            placeholder = current
+        }
     }
 
     private func loadCurrentEntry() {
@@ -1000,6 +1569,78 @@ struct ContentView: View {
             guard ["md", "markdown", "txt", "mdown", "mkd"].contains(ext) else { return }
             DispatchQueue.main.async {
                 loadFile(url)
+            }
+        }
+        return true
+    }
+}
+
+// MARK: - Bookmark drag-drop
+
+/// Handles drops onto a specific bookmark row — the dragged bookmark is moved
+/// to that target row's index. Tail drops (past the last row) are handled by
+/// `BookmarkDropTailDelegate` because a row delegate can't see "below the list."
+private struct BookmarkDropDelegate: DropDelegate {
+    let target: Bookmark
+    let manager: BookmarksManager
+    @Binding var hovered: Int64?
+    @Binding var dragging: Int64?
+
+    func validateDrop(info: DropInfo) -> Bool { true }
+
+    func dropEntered(info: DropInfo) {
+        // Don't show a drop indicator on the row being dragged (no-op move).
+        if let dragging, dragging == target.id {
+            hovered = nil
+        } else {
+            hovered = target.id
+        }
+    }
+
+    func dropExited(info: DropInfo) {
+        if hovered == target.id { hovered = nil }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer {
+            hovered = nil
+            dragging = nil
+        }
+        guard let provider = info.itemProviders(for: [.text]).first else { return false }
+        let mgr = manager
+        let targetID = target.id
+        provider.loadObject(ofClass: NSString.self) { item, _ in
+            guard let str = item as? String else { return }
+            // Payload format: "mdv-bookmark:<id>"
+            let parts = str.components(separatedBy: ":")
+            guard parts.count == 2, parts[0] == "mdv-bookmark", let id = Int64(parts[1]) else { return }
+            DispatchQueue.main.async {
+                guard let dest = mgr.bookmarks.firstIndex(where: { $0.id == targetID }) else { return }
+                mgr.moveBookmark(id: id, toIndex: dest)
+            }
+        }
+        return true
+    }
+}
+
+/// Drop target for the spacer below the last bookmark — sends the dragged item
+/// to the very end of the list.
+private struct BookmarkDropTailDelegate: DropDelegate {
+    let manager: BookmarksManager
+    @Binding var dragging: Int64?
+
+    func validateDrop(info: DropInfo) -> Bool { true }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer { dragging = nil }
+        guard let provider = info.itemProviders(for: [.text]).first else { return false }
+        let mgr = manager
+        provider.loadObject(ofClass: NSString.self) { item, _ in
+            guard let str = item as? String else { return }
+            let parts = str.components(separatedBy: ":")
+            guard parts.count == 2, parts[0] == "mdv-bookmark", let id = Int64(parts[1]) else { return }
+            DispatchQueue.main.async {
+                mgr.moveBookmarkToEnd(id: id)
             }
         }
         return true
