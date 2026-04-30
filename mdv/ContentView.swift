@@ -35,6 +35,19 @@ struct ContentView: View {
     /// fresh content into the viewer automatically.
     @State private var fileWatcher = FileWatcher()
 
+    /// Browser-style back stack populated when a link click navigates to
+    /// another md file. ⌘← pops it. Sidebar clicks / drag-drop / Open
+    /// dialog don't touch this — those are explicit jumps, not "history".
+    @State private var backStack: [HistoryEntry] = []
+    /// Forward stack — populated when the user goes back, so ⌘→ can
+    /// re-enter what they just left. Cleared whenever a fresh link click
+    /// branches the history.
+    @State private var forwardStack: [HistoryEntry] = []
+    /// If a fragment-bearing link triggers a cross-document load, the
+    /// fragment is stashed here and consumed once `rawMarkdown` updates
+    /// (the headings only exist after the file is read).
+    @State private var pendingFragment: String? = nil
+
     // Bookmarks pane (lives below TOC inside the inspector)
     @AppStorage("mdv_bookmarks_height") private var bookmarksHeight: Double = 240
     @AppStorage("mdv_bookmarks_expanded") private var bookmarksExpandedRaw: Bool = false
@@ -186,6 +199,7 @@ struct ContentView: View {
         .toolbarBackground(.hidden, for: .windowToolbar)
         .toolbarColorScheme(themes.current.isDark ? .dark : .light, for: .windowToolbar)
         .preferredColorScheme(themes.current.isDark ? .dark : .light)
+        .environment(\.openURL, OpenURLAction { url in handleLinkClick(url) })
         .background(WindowAccessor { window in
             applyThemeToWindow(window)
         })
@@ -234,7 +248,9 @@ struct ContentView: View {
             openInExternalEditor: {
                 if editorAppPath.isEmpty { pickEditor() } else { openCurrentFileInEditor() }
             },
-            forgetExternalEditor: { editorAppPath = "" }
+            forgetExternalEditor: { editorAppPath = "" },
+            navigateBack: goBack,
+            navigateForward: goForward
         ))
         .onOpenURL { url in
             loadFile(url)
@@ -268,6 +284,12 @@ struct ContentView: View {
                 )
                 pendingPostLoadAnchor = nil
                 pendingAnchorBlock = resolved
+            }
+            // Cross-document fragment scroll, deferred until headings exist.
+            if let frag = pendingFragment {
+                pendingFragment = nil
+                // One runloop tick so tocHeadings is up-to-date for the new content.
+                DispatchQueue.main.async { scrollToFragment(frag) }
             }
         }
         .onChange(of: isSearching) { active in
@@ -1669,7 +1691,6 @@ struct ContentView: View {
     private func blockView(block: String, idx: Int) -> some View {
         if shouldInlineHighlight(block: block, idx: idx) {
             Text(highlightedAttributedString(for: block, idx: idx))
-                .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             Markdown(block)
@@ -1686,6 +1707,142 @@ struct ContentView: View {
     private var currentDocumentDirectory: URL? {
         guard let path = selectedEntry?.path else { return nil }
         return URL(fileURLWithPath: path).deletingLastPathComponent()
+    }
+
+    /// Intercepts link clicks. md-to-md (and `.markdown` / `.mdown`)
+    /// navigates inside the viewer; everything else (https, mailto,
+    /// data, file:// to non-markdown) falls through to the system
+    /// handler so it lands in the user's default browser / app.
+    private func handleLinkClick(_ url: URL) -> OpenURLAction.Result {
+        let mdExts: Set<String> = ["md", "markdown", "mdown"]
+        let fragment = url.fragment
+
+        // Same-document fragment (#section). Resolve to a heading and
+        // scroll there.
+        if url.scheme == nil, let frag = fragment, !frag.isEmpty,
+           url.path.isEmpty {
+            scrollToFragment(frag)
+            return .handled
+        }
+
+        // Resolve into a fully-absolute file URL so downstream logic and
+        // any LaunchServices fallback see a well-formed URL. Relative
+        // links (`README.md`, `./code.md`, `images/foo.png`) get joined
+        // with the current document's parent directory using string-
+        // level path arithmetic — `URL(fileURLWithPath:relativeTo:)`
+        // makes a relative URL whose `.path` can return just the
+        // relative portion, which silently breaks `fileExists(atPath:)`
+        // and downstream consumers.
+        let resolved: URL = {
+            if let scheme = url.scheme, scheme != "file" {
+                return url
+            }
+            let rawPath: String
+            if url.scheme == "file" {
+                rawPath = url.path
+            } else {
+                rawPath = url.path
+            }
+            if rawPath.hasPrefix("/") {
+                return URL(fileURLWithPath: rawPath).standardizedFileURL
+            }
+            guard let base = currentDocumentDirectory else {
+                return URL(fileURLWithPath: rawPath).standardizedFileURL
+            }
+            let joined = (base.path as NSString).appendingPathComponent(rawPath)
+            let standardized = (joined as NSString).standardizingPath
+            return URL(fileURLWithPath: standardized)
+        }()
+
+        // Local markdown that exists? Load it inline.
+        if resolved.isFileURL,
+           mdExts.contains(resolved.pathExtension.lowercased()),
+           FileManager.default.fileExists(atPath: resolved.path) {
+            // Push the page we're leaving onto the back stack so ⌘←
+            // returns to it. A fresh link click also resets the
+            // forward stack — same as a browser. Don't push when
+            // navigating to the same file (a fragment-only jump
+            // within the doc).
+            if let current = selectedEntry, current.path != resolved.path {
+                backStack.append(current)
+                forwardStack.removeAll()
+            }
+            // Cross-document fragment: stash, scroll once the new
+            // doc's blocks are computed. Same-document fragment falls
+            // out as an immediate scroll because rawMarkdown won't
+            // change.
+            if let frag = fragment, !frag.isEmpty {
+                if selectedEntry?.path == resolved.path {
+                    scrollToFragment(frag)
+                } else {
+                    pendingFragment = frag
+                }
+            }
+            loadFile(resolved)
+            return .handled
+        }
+
+        // Local non-markdown file → system handler (Preview, etc.).
+        // Only if the file exists; otherwise fall through and let the
+        // system put up its own "couldn't be opened" dialog with the
+        // ORIGINAL URL so the user sees what they actually clicked.
+        if resolved.isFileURL, FileManager.default.fileExists(atPath: resolved.path) {
+            return .systemAction(resolved)
+        }
+
+        // Anything else (http, mailto, custom schemes, broken refs).
+        return .systemAction
+    }
+
+    private func goBack() {
+        guard let prev = backStack.popLast() else { return }
+        if let current = selectedEntry { forwardStack.append(current) }
+        selectedEntry = prev
+    }
+
+    private func goForward() {
+        guard let next = forwardStack.popLast() else { return }
+        if let current = selectedEntry { backStack.append(current) }
+        selectedEntry = next
+    }
+
+    /// Scrolls the markdown viewport to the heading whose GitHub-flavored
+    /// slug matches `fragment`. No-op if there's no match (link is stale
+    /// or pointed at something the parser didn't classify as a heading).
+    private func scrollToFragment(_ fragment: String) {
+        let target = headingSlug(fragment)
+        guard let heading = tocHeadings.first(where: { headingSlug($0.text) == target }) else {
+            return
+        }
+        tocScrollTrigger = heading.blockIndex
+    }
+
+    /// GitHub-style heading slug: lowercase, drop everything that isn't a
+    /// letter, digit, hyphen, or underscore, and collapse runs of
+    /// whitespace into single hyphens. Idempotent for already-slug input
+    /// so it can be applied to both the URL fragment and the heading
+    /// text without thinking about which is which.
+    private func headingSlug(_ s: String) -> String {
+        var out = ""
+        var lastWasHyphen = false
+        for ch in s.lowercased() {
+            if ch.isLetter || ch.isNumber {
+                out.append(ch)
+                lastWasHyphen = false
+            } else if ch == "-" || ch == "_" {
+                if !out.isEmpty {
+                    out.append(ch)
+                    lastWasHyphen = (ch == "-")
+                }
+            } else if ch.isWhitespace {
+                if !out.isEmpty && !lastWasHyphen {
+                    out.append("-")
+                    lastWasHyphen = true
+                }
+            }
+        }
+        while out.last == "-" || out.last == "_" { out.removeLast() }
+        return out
     }
 
     private func shouldInlineHighlight(block: String, idx: Int) -> Bool {
@@ -2320,6 +2477,8 @@ private struct NotificationHandlers: ViewModifier {
     let chooseExternalEditor: () -> Void
     let openInExternalEditor: () -> Void
     let forgetExternalEditor: () -> Void
+    let navigateBack: () -> Void
+    let navigateForward: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -2339,6 +2498,8 @@ private struct NotificationHandlers: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .chooseExternalEditor)) { _ in chooseExternalEditor() }
             .onReceive(NotificationCenter.default.publisher(for: .openInExternalEditor)) { _ in openInExternalEditor() }
             .onReceive(NotificationCenter.default.publisher(for: .forgetExternalEditor)) { _ in forgetExternalEditor() }
+            .onReceive(NotificationCenter.default.publisher(for: .navigateBack)) { _ in navigateBack() }
+            .onReceive(NotificationCenter.default.publisher(for: .navigateForward)) { _ in navigateForward() }
     }
 }
 
@@ -2533,3 +2694,4 @@ struct LocalImageProvider: ImageProvider {
         )
     }
 }
+

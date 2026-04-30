@@ -61,6 +61,16 @@ struct mdvApp: App {
                 }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
             }
+            CommandMenu("Navigate") {
+                Button("Back") {
+                    NotificationCenter.default.post(name: .navigateBack, object: nil)
+                }
+                .keyboardShortcut(.leftArrow, modifiers: .command)
+                Button("Forward") {
+                    NotificationCenter.default.post(name: .navigateForward, object: nil)
+                }
+                .keyboardShortcut(.rightArrow, modifiers: .command)
+            }
             CommandMenu("Bookmarks") {
                 Button("Bookmark Current Spot") {
                     NotificationCenter.default.post(name: .toggleBookmark, object: nil)
@@ -127,4 +137,6 @@ extension Notification.Name {
     static let chooseExternalEditor = Notification.Name("chooseExternalEditor")
     static let openInExternalEditor = Notification.Name("openInExternalEditor")
     static let forgetExternalEditor = Notification.Name("forgetExternalEditor")
+    static let navigateBack = Notification.Name("navigateBack")
+    static let navigateForward = Notification.Name("navigateForward")
 }
