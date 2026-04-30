@@ -93,6 +93,238 @@ struct MDVTheme: Identifiable, Hashable {
     /// look native; theme authors can swap in something that doesn't clash
     /// with the palette (Sevilla → terracotta, Charcoal → muted GitHub blue).
     var accent: Color = .accentColor
+
+    // MARK: Code highlighting
+
+    /// Per-theme syntax-highlighting palette. `nil` falls back to a sane
+    /// GitHub-Light / One-Dark default picked off `isDark` — see `resolvedCodePalette`.
+    var codePalette: CodePalette? = nil
+
+    var resolvedCodePalette: CodePalette {
+        codePalette ?? (isDark ? .oneDarkDefault : .githubLightDefault)
+    }
+}
+
+/// Maps tree-sitter capture names to colors. Slots cover the common
+/// `highlights.scm` capture vocabulary (`@keyword`, `@string`, …);
+/// unmapped captures fall back to `plain`.
+struct CodePalette: Hashable {
+    /// Optional override for the code-block background. `nil` means
+    /// inherit `MDVTheme.secondaryBackground`.
+    let background: Color?
+
+    let plain: Color
+    let keyword: Color
+    let string: Color
+    let number: Color
+    let comment: Color
+    let type: Color
+    let function: Color
+    let attribute: Color
+    let variable: Color
+    let constant: Color
+    let operatorColor: Color
+
+    /// Reserved for the line-number gutter (Phase 3).
+    let lineNumber: Color
+    /// Reserved for the find-current-match line tint (Phase 3).
+    let lineHighlight: Color
+
+    /// Reserved for diff blocks (Phase 5).
+    let diffAdd: Color
+    let diffRemove: Color
+    let diffAddBg: Color
+    let diffRemoveBg: Color
+}
+
+extension CodePalette {
+    /// GitHub Light syntax — canonical reference for light themes. Used by
+    /// any light theme that doesn't ship its own palette.
+    static let githubLightDefault = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0x1F2328FF),
+        keyword:      Color(rgba: 0xCF222EFF),  // red
+        string:       Color(rgba: 0x0A3069FF),  // deep blue
+        number:       Color(rgba: 0x0550AEFF),
+        comment:      Color(rgba: 0x6E7781FF),  // grey, italic in render
+        type:         Color(rgba: 0x953800FF),  // orange-brown
+        function:     Color(rgba: 0x8250DFFF),  // purple
+        attribute:    Color(rgba: 0x116329FF),  // green
+        variable:     Color(rgba: 0x1F2328FF),
+        constant:     Color(rgba: 0x0550AEFF),
+        operatorColor:Color(rgba: 0xCF222EFF),
+        lineNumber:   Color(rgba: 0x8C959FFF),
+        lineHighlight:Color(rgba: 0xFFF8C5FF),
+        diffAdd:      Color(rgba: 0x1A7F37FF),
+        diffRemove:   Color(rgba: 0xCF222EFF),
+        diffAddBg:    Color(rgba: 0xDAFBE1FF),
+        diffRemoveBg: Color(rgba: 0xFFEBE9FF)
+    )
+
+    /// One Dark syntax — canonical reference for dark themes.
+    static let oneDarkDefault = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0xABB2BFFF),
+        keyword:      Color(rgba: 0xC678DDFF),  // purple
+        string:       Color(rgba: 0x98C379FF),  // green
+        number:       Color(rgba: 0xD19A66FF),  // orange
+        comment:      Color(rgba: 0x7F848EFF),
+        type:         Color(rgba: 0xE5C07BFF),  // yellow
+        function:     Color(rgba: 0x61AFEFFF),  // blue
+        attribute:    Color(rgba: 0xD19A66FF),
+        variable:     Color(rgba: 0xE06C75FF),  // soft red
+        constant:     Color(rgba: 0xD19A66FF),
+        operatorColor:Color(rgba: 0xC678DDFF),
+        lineNumber:   Color(rgba: 0x636D83FF),
+        lineHighlight:Color(rgba: 0x3E4451FF),
+        diffAdd:      Color(rgba: 0x98C379FF),
+        diffRemove:   Color(rgba: 0xE06C75FF),
+        diffAddBg:    Color(rgba: 0x1E3A2BFF),
+        diffRemoveBg: Color(rgba: 0x3E1C20FF)
+    )
+
+    /// Sevilla — earth-tone palette tuned for the cream/terracotta reading
+    /// theme. Lower-saturation than GitHub Light so code stops short of
+    /// shouting; the azulejo-blue function color mirrors the theme's link.
+    static let sevillaPalette = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0x42372CFF),  // = body
+        keyword:      Color(rgba: 0x8C2A1AFF),  // deep terracotta
+        string:       Color(rgba: 0x5C4030FF),  // walnut
+        number:       Color(rgba: 0x7A4A1FFF),  // umber
+        comment:      Color(rgba: 0x968874FF),  // = tertiaryText, italic in render
+        type:         Color(rgba: 0x7B5C3DFF),  // raw umber
+        function:     Color(rgba: 0x2C5F8DFF),  // azulejo blue (= link)
+        attribute:    Color(rgba: 0xB0623EFF),  // terracotta (= accent)
+        variable:     Color(rgba: 0x42372CFF),
+        constant:     Color(rgba: 0x7A4A1FFF),
+        operatorColor:Color(rgba: 0x42372CFF),
+        lineNumber:   Color(rgba: 0xC0B49AFF),
+        lineHighlight:Color(rgba: 0xE6DEC2FF),
+        diffAdd:      Color(rgba: 0x4F7138FF),
+        diffRemove:   Color(rgba: 0x8C2A1AFF),
+        diffAddBg:    Color(rgba: 0xE3E5C9FF),
+        diffRemoveBg: Color(rgba: 0xF0DCD0FF)
+    )
+
+    /// Charcoal — GitHub-Dark-ish palette. Charcoal is the operational
+    /// theme; we want vivid token semantics without compromising Charcoal's
+    /// neutral grey-blue chrome. GitHub Dark's actual published palette
+    /// reads cleanly against Charcoal's `#1B1B21` and stays well clear of
+    /// the muted accent blue used elsewhere in the UI.
+    static let charcoalPalette = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0xC9D1D9FF),
+        keyword:      Color(rgba: 0xFF7B72FF),  // GitHub Dark coral
+        string:       Color(rgba: 0xA5D6FFFF),  // light blue
+        number:       Color(rgba: 0x79C0FFFF),
+        comment:      Color(rgba: 0x8B949EFF),
+        type:         Color(rgba: 0xFFA657FF),  // orange
+        function:     Color(rgba: 0xD2A8FFFF),  // purple
+        attribute:    Color(rgba: 0x7EE787FF),  // green
+        variable:     Color(rgba: 0xC9D1D9FF),
+        constant:     Color(rgba: 0x79C0FFFF),
+        operatorColor:Color(rgba: 0xFF7B72FF),
+        lineNumber:   Color(rgba: 0x484F58FF),
+        lineHighlight:Color(rgba: 0x2A2F37FF),
+        diffAdd:      Color(rgba: 0x7EE787FF),
+        diffRemove:   Color(rgba: 0xFF7B72FF),
+        diffAddBg:    Color(rgba: 0x0E2B1AFF),
+        diffRemoveBg: Color(rgba: 0x3D1416FF)
+    )
+
+    /// Solarized Light — Ethan Schoonover's canonical accent assignments.
+    /// Green for keywords, cyan for strings, blue for functions, magenta
+    /// for numbers. The palette this theme was made for.
+    static let solarizedLightPalette = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0x586E75FF),  // base01 (= body)
+        keyword:      Color(rgba: 0x859900FF),  // green
+        string:       Color(rgba: 0x2AA198FF),  // cyan
+        number:       Color(rgba: 0xD33682FF),  // magenta
+        comment:      Color(rgba: 0x93A1A1FF),  // base1
+        type:         Color(rgba: 0xB58900FF),  // yellow
+        function:     Color(rgba: 0x268BD2FF),  // blue
+        attribute:    Color(rgba: 0xCB4B16FF),  // orange (= accent)
+        variable:     Color(rgba: 0x586E75FF),
+        constant:     Color(rgba: 0x6C71C4FF),  // violet
+        operatorColor:Color(rgba: 0x859900FF),
+        lineNumber:   Color(rgba: 0x93A1A1FF),
+        lineHighlight:Color(rgba: 0xEEE8D5FF),  // base2
+        diffAdd:      Color(rgba: 0x859900FF),
+        diffRemove:   Color(rgba: 0xDC322FFF),  // red
+        diffAddBg:    Color(rgba: 0xEAE9CDFF),
+        diffRemoveBg: Color(rgba: 0xF0D8D2FF)
+    )
+
+    /// Solarized Dark — same Solarized accents on the dark base.
+    static let solarizedDarkPalette = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0x93A1A1FF),  // base1
+        keyword:      Color(rgba: 0x859900FF),
+        string:       Color(rgba: 0x2AA198FF),
+        number:       Color(rgba: 0xD33682FF),
+        comment:      Color(rgba: 0x586E75FF),  // base01 (darker for dark bg)
+        type:         Color(rgba: 0xB58900FF),
+        function:     Color(rgba: 0x268BD2FF),
+        attribute:    Color(rgba: 0xCB4B16FF),
+        variable:     Color(rgba: 0x93A1A1FF),
+        constant:     Color(rgba: 0x6C71C4FF),
+        operatorColor:Color(rgba: 0x859900FF),
+        lineNumber:   Color(rgba: 0x586E75FF),
+        lineHighlight:Color(rgba: 0x073642FF),  // base02
+        diffAdd:      Color(rgba: 0x859900FF),
+        diffRemove:   Color(rgba: 0xDC322FFF),
+        diffAddBg:    Color(rgba: 0x0F2E1AFF),
+        diffRemoveBg: Color(rgba: 0x3A1817FF)
+    )
+
+    /// Phosphor — monochrome amber with brightness-only differentiation.
+    /// CRT vibe: never let green or red sneak in. Tokens read by *weight*
+    /// of brightness, not hue.
+    static let phosphorPalette = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0xF5F5F5FF),  // = body
+        keyword:      Color(rgba: 0xFFB84DFF),  // bright amber
+        string:       Color(rgba: 0xFFD43BFF),  // yellow (= link)
+        number:       Color(rgba: 0xFFAA00FF),
+        comment:      Color(rgba: 0x888888FF),
+        type:         Color(rgba: 0xFFD080FF),
+        function:     Color(rgba: 0xFFA500FF),  // amber (= heading)
+        attribute:    Color(rgba: 0xFFC966FF),
+        variable:     Color(rgba: 0xF5F5F5FF),
+        constant:     Color(rgba: 0xFFAA00FF),
+        operatorColor:Color(rgba: 0xF5F5F5FF),
+        lineNumber:   Color(rgba: 0x6E5A2EFF),
+        lineHighlight:Color(rgba: 0x2A2210FF),
+        diffAdd:      Color(rgba: 0xCFCFCFFF),
+        diffRemove:   Color(rgba: 0x888888FF),
+        diffAddBg:    Color(rgba: 0x1A1A1AFF),
+        diffRemoveBg: Color(rgba: 0x141414FF)
+    )
+
+    /// Twilight — pastel palette matching the cool navy bg + mint heading
+    /// + cream link. Low saturation throughout.
+    static let twilightPalette = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0xB0B5BCFF),  // = body
+        keyword:      Color(rgba: 0xF8B3B0FF),  // soft pink-cream
+        string:       Color(rgba: 0xA6E3B0FF),  // soft mint (in same family as the heading)
+        number:       Color(rgba: 0xFBD78DFF),  // warm cream
+        comment:      Color(rgba: 0x5B6168FF),  // = tertiaryText
+        type:         Color(rgba: 0xFFD580FF),  // cream (= link)
+        function:     Color(rgba: 0xA8C9F0FF),  // soft pastel blue
+        attribute:    Color(rgba: 0xC8B5E8FF),  // lilac
+        variable:     Color(rgba: 0xB0B5BCFF),
+        constant:     Color(rgba: 0xFBD78DFF),
+        operatorColor:Color(rgba: 0xF8B3B0FF),
+        lineNumber:   Color(rgba: 0x3F454CFF),
+        lineHighlight:Color(rgba: 0x1A2129FF),
+        diffAdd:      Color(rgba: 0xA6E3B0FF),
+        diffRemove:   Color(rgba: 0xF8B3B0FF),
+        diffAddBg:    Color(rgba: 0x122319FF),
+        diffRemoveBg: Color(rgba: 0x271419FF)
+    )
 }
 
 extension MDVTheme {
@@ -231,19 +463,13 @@ extension MDVTheme {
                 .fixedSize(horizontal: false, vertical: true)
             }
             .codeBlock { configuration in
-                ScrollView(.horizontal) {
-                    configuration.label
-                        .fixedSize(horizontal: false, vertical: true)
-                        .relativeLineSpacing(.em(0.225))
-                        .markdownTextStyle {
-                            FontFamilyVariant(.monospaced)
-                            FontSize(.em(0.85))
-                        }
-                        .padding(16)
-                }
-                .background(sbg)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .markdownMargin(top: 0, bottom: 16)
+                // CodeBlockChrome owns the scroll/wrap container, the
+                // language label, the hover toolbar, and the right-click
+                // menu. Font + colors are set inside MDVCodeSyntaxHighlighter —
+                // the configuration.label here is the Text we produced and we
+                // don't apply markdownTextStyle font/size on top of it.
+                CodeBlockChrome(configuration: configuration, theme: self)
+                    .markdownMargin(top: 0, bottom: 16)
             }
             .listItem { configuration in
                 configuration.label
@@ -321,7 +547,8 @@ extension MDVTheme {
         blockquoteBar: Color(rgba: 0xD1D5DBFF),
         sidebarTint: Color(rgba: 0xFFFFFFFF),
         sidebarTintOpacity: 0.0,
-        accent: Color(rgba: 0x1D6FE0FF)               // = link — High Contrast leans into system-blue territory
+        accent: Color(rgba: 0x1D6FE0FF),              // = link — High Contrast leans into system-blue territory
+        codePalette: .githubLightDefault              // GitHub Light syntax: blue keywords, deep-blue strings, grey italic comments
     )
 
     /// "GitHub README, dark, all business" — compact, neutral, high density.
@@ -364,7 +591,8 @@ extension MDVTheme {
         h2BottomSpacing: 13,                          // was 10 — per user spec
         h3TopSpacing: 18,
         h3BottomSpacing: 8,
-        accent: Color(rgba: 0x2E7AEBFF)               // muted GitHub blue — calmer than system .accentColor for in-viewer affordances
+        accent: Color(rgba: 0x2E7AEBFF),              // muted GitHub blue — calmer than system .accentColor for in-viewer affordances
+        codePalette: .charcoalPalette                 // GitHub Dark — vivid token semantics against the cool grey-blue chrome
     )
 
     /// Ethan Schoonover's Solarized Light palette.
@@ -386,7 +614,8 @@ extension MDVTheme {
         blockquoteBar: Color(rgba: 0xCB4B16FF), // orange — accents the bar
         sidebarTint: Color(rgba: 0xFDF6E3FF),
         sidebarTintOpacity: 0.55,
-        accent: Color(rgba: 0xCB4B16FF)        // Solarized orange — the warm accent is more interesting than another blue
+        accent: Color(rgba: 0xCB4B16FF),       // Solarized orange — the warm accent is more interesting than another blue
+        codePalette: .solarizedLightPalette    // canonical Schoonover accents — the palette this theme exists for
     )
 
     /// Long-form reading theme using bundled Alegreya (a Spanish-tradition
@@ -431,7 +660,8 @@ extension MDVTheme {
         h2BottomSpacing: 12,
         h3TopSpacing: 22,
         h3BottomSpacing: 8,
-        accent: Color(rgba: 0xB0623EFF)               // terracotta — the warm accent for in-viewer affordances (bookmark-hover stripe etc.)
+        accent: Color(rgba: 0xB0623EFF),              // terracotta — the warm accent for in-viewer affordances (bookmark-hover stripe etc.)
+        codePalette: .sevillaPalette                  // earth-tones — calm, lower-saturation, function color borrows the link's azulejo blue
     )
 
     static let solarizedDark = MDVTheme(
@@ -451,7 +681,8 @@ extension MDVTheme {
         blockquoteBar: Color(rgba: 0xB58900FF), // yellow accent
         sidebarTint: Color(rgba: 0x002B36FF),
         sidebarTintOpacity: 0.32,
-        accent: Color(rgba: 0xB58900FF)        // Solarized yellow — matches the blockquoteBar; warm against the cool base03 bg
+        accent: Color(rgba: 0xB58900FF),       // Solarized yellow — matches the blockquoteBar; warm against the cool base03 bg
+        codePalette: .solarizedDarkPalette     // same Solarized accents on the base03 dark base
     )
 
     /// Amber-on-black CRT vibe: pure black background, hi-vis amber for headings,
@@ -473,7 +704,8 @@ extension MDVTheme {
         blockquoteBar: Color(rgba: 0xFFA500FF),
         sidebarTint: Color(rgba: 0x000000FF),
         sidebarTintOpacity: 0.30,
-        accent: Color(rgba: 0xFFA500FF)   // amber — leans into the CRT vibe
+        accent: Color(rgba: 0xFFA500FF),  // amber — leans into the CRT vibe
+        codePalette: .phosphorPalette     // monochrome amber, brightness-only differentiation. No green or red.
     )
 
     /// Deep navy, mint heading, cream link — a calm low-light palette.
@@ -494,7 +726,8 @@ extension MDVTheme {
         blockquoteBar: Color(rgba: 0x6EBA7FFF),
         sidebarTint: Color(rgba: 0x0A0F14FF),
         sidebarTintOpacity: 0.32,
-        accent: Color(rgba: 0xFFD580FF)   // cream — the warm side of the palette, matches the link
+        accent: Color(rgba: 0xFFD580FF),  // cream — the warm side of the palette, matches the link
+        codePalette: .twilightPalette     // pastels: pink-cream keywords, soft mint strings, lilac attributes — matches the navy/mint/cream palette
     )
 
     static let all: [MDVTheme] = [

@@ -707,6 +707,7 @@ struct ContentView: View {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { (idx, block) in
                                 Markdown(block)
                                     .markdownTheme(themes.current.markdownTheme)
+                                    .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(
@@ -790,10 +791,52 @@ struct ContentView: View {
     }
 
     private var blocks: [String] {
-        let parts = rawMarkdown.components(separatedBy: "\n\n")
-        return parts
-            .map { $0.trimmingCharacters(in: .newlines) }
-            .filter { !$0.isEmpty }
+        // Fence-aware split. A blank line ends a paragraph block normally,
+        // but blank lines INSIDE a fenced code block (``` or ~~~) are part
+        // of the code and must not split the block — otherwise multi-
+        // paragraph code samples get shredded into separate single-line
+        // code-blocks-or-prose, which mangles syntax highlighting.
+        var result: [String] = []
+        var current: [String] = []
+        var fenceMarker: String? = nil  // nil → outside, "```" or "~~~" → inside
+        let lines = rawMarkdown.components(separatedBy: "\n")
+
+        func flush() {
+            let joined = current.joined(separator: "\n")
+                .trimmingCharacters(in: .newlines)
+            if !joined.isEmpty { result.append(joined) }
+            current.removeAll(keepingCapacity: true)
+        }
+
+        for line in lines {
+            let trimmedStart = line.drop(while: { $0 == " " })
+            if let marker = fenceMarker {
+                current.append(line)
+                if trimmedStart.hasPrefix(marker) {
+                    fenceMarker = nil
+                }
+                continue
+            }
+            if trimmedStart.hasPrefix("```") {
+                if !current.isEmpty { flush() }
+                current.append(line)
+                fenceMarker = "```"
+                continue
+            }
+            if trimmedStart.hasPrefix("~~~") {
+                if !current.isEmpty { flush() }
+                current.append(line)
+                fenceMarker = "~~~"
+                continue
+            }
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                flush()
+            } else {
+                current.append(line)
+            }
+        }
+        flush()
+        return result
     }
 
     // MARK: - Table of Contents
