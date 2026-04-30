@@ -1675,7 +1675,17 @@ struct ContentView: View {
             Markdown(block)
                 .markdownTheme(themes.current.markdownTheme)
                 .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
+                .markdownImageProvider(LocalImageProvider(baseURL: currentDocumentDirectory))
         }
+    }
+
+    /// Directory the currently-loaded markdown file lives in. Relative
+    /// image URLs in `![alt](path)` are resolved against this so an
+    /// adjacent `diagram.png` works the same as it does in any other
+    /// markdown viewer / GitHub render.
+    private var currentDocumentDirectory: URL? {
+        guard let path = selectedEntry?.path else { return nil }
+        return URL(fileURLWithPath: path).deletingLastPathComponent()
     }
 
     private func shouldInlineHighlight(block: String, idx: Int) -> Bool {
@@ -1690,6 +1700,11 @@ struct ContentView: View {
            lines[1].allSatisfy({ "-:| ".contains($0) }) {
             return false
         }
+        // Inline-highlight strips block markers and renders via Text, which
+        // doesn't render embedded images. Defer to MarkdownUI for any block
+        // containing an image so the image survives — the user still gets
+        // the block-level yellow tint as a find affordance.
+        if trimmed.contains("![") { return false }
         return true
     }
 
@@ -2408,5 +2423,113 @@ final class FileWatcher {
         }
         onChange = nil
         watchedPathResolved = ""
+    }
+}
+
+// MARK: - Image provider
+
+/// MarkdownUI image provider that loads local files and data: URIs from
+/// disk, and falls back to MarkdownUI's network-backed default for
+/// `http(s)` URLs. Relative paths in `![alt](path)` are resolved
+/// against the markdown file's parent directory so adjacent images
+/// "just work" the way they do on GitHub or any other viewer.
+struct LocalImageProvider: ImageProvider {
+    let baseURL: URL?
+
+    func makeImage(url: URL?) -> some View {
+        Group {
+            if let url = url {
+                content(for: url)
+            } else {
+                EmptyView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func content(for url: URL) -> some View {
+        let resolved = resolve(url)
+        if resolved.scheme == "data" {
+            dataURIImage(resolved)
+        } else if resolved.isFileURL {
+            localFileImage(resolved)
+        } else {
+            // Network or anything else — let MarkdownUI's default handle it.
+            DefaultImageProvider().makeImage(url: resolved)
+        }
+    }
+
+    private func resolve(_ url: URL) -> URL {
+        // Already absolute (file://, https://, data:, …)? Use as-is.
+        if url.scheme != nil { return url }
+        // Relative — resolve against the document's directory if we have one.
+        if let base = baseURL {
+            return URL(fileURLWithPath: url.path, relativeTo: base).standardizedFileURL
+        }
+        // No base — best effort: treat as file path relative to cwd.
+        return URL(fileURLWithPath: url.path).standardizedFileURL
+    }
+
+    @ViewBuilder
+    private func localFileImage(_ url: URL) -> some View {
+        if let nsImage = NSImage(contentsOf: url) {
+            // Cap at the image's intrinsic pixel size so we don't upscale
+            // small assets; the column will naturally shrink it for narrow
+            // windows because of `.aspectRatio(contentMode: .fit)`.
+            let size = nsImage.size
+            Image(nsImage: nsImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: size.width > 0 ? size.width : nil)
+        } else {
+            missingImagePlaceholder(for: url.lastPathComponent)
+        }
+    }
+
+    @ViewBuilder
+    private func dataURIImage(_ url: URL) -> some View {
+        if let nsImage = decodeDataURIImage(url) {
+            let size = nsImage.size
+            Image(nsImage: nsImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: size.width > 0 ? size.width : nil)
+        } else {
+            missingImagePlaceholder(for: "inline data:")
+        }
+    }
+
+    private func decodeDataURIImage(_ url: URL) -> NSImage? {
+        // data:[<mime>][;base64],<payload>
+        let raw = url.absoluteString
+        guard raw.hasPrefix("data:"),
+              let comma = raw.firstIndex(of: ",") else { return nil }
+        let metaStart = raw.index(raw.startIndex, offsetBy: 5)
+        let meta = String(raw[metaStart..<comma])
+        let payload = String(raw[raw.index(after: comma)...])
+        guard let data = decodeDataURIPayload(meta: meta, payload: payload) else { return nil }
+        return NSImage(data: data)
+    }
+
+    private func decodeDataURIPayload(meta: String, payload: String) -> Data? {
+        if meta.contains(";base64") {
+            return Data(base64Encoded: payload, options: .ignoreUnknownCharacters)
+        }
+        return payload.removingPercentEncoding?.data(using: .utf8)
+    }
+
+    private func missingImagePlaceholder(for name: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "photo")
+                .foregroundStyle(.secondary)
+            Text("image not found: \(name)")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.08))
+        )
     }
 }
