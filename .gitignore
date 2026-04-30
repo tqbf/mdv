@@ -1,0 +1,12 @@
+# SwiftPM build artifacts
+.build/
+.swiftpm/
+
+# Assembled .app bundle (created by ./build.sh)
+build/
+
+# Icon scratch dir (created by `make icon`)
+build_icon/
+
+# macOS
+.DS_Store

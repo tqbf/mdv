@@ -1,6 +1,7 @@
 import SwiftUI
 import MarkdownUI
 import AppKit
+import CoreServices
 
 struct ContentView: View {
     @EnvironmentObject var history: HistoryManager
@@ -18,11 +19,21 @@ struct ContentView: View {
     @State private var dragHandleHovered = false
 
     // TOC + Bookmarks (right inspector)
-    @State private var inspectorVisible: Bool = false
+    @AppStorage("mdv_inspector_visible") private var inspectorVisible: Bool = false
     @State private var tocSelectedBlock: Int? = nil
     @State private var tocScrollTrigger: Int? = nil
     @State private var hoveredHeading: Int? = nil
+    @State private var tocSearchQuery: String = ""
+    @State private var tocSearchVisible: Bool = false
+    @FocusState private var tocSearchFocused: Bool
     private let inspectorWidth: CGFloat = 240
+
+    // External editor (Edit button in toolbar)
+    @AppStorage("mdv_editor_app_path") private var editorAppPath: String = ""
+
+    /// Watches the currently-loaded file so external-editor saves push
+    /// fresh content into the viewer automatically.
+    @State private var fileWatcher = FileWatcher()
 
     // Bookmarks pane (lives below TOC inside the inspector)
     @AppStorage("mdv_bookmarks_height") private var bookmarksHeight: Double = 240
@@ -86,6 +97,7 @@ struct ContentView: View {
 
     // Global (cross-history) search
     @State private var globalQuery: String = ""
+    @State private var globalSearchVisible: Bool = false
     @State private var globalHits: [Database.SearchHit] = []
     @State private var globalSearchToken: Int = 0
     @State private var hoveredHit: UUID? = nil
@@ -162,6 +174,31 @@ struct ContentView: View {
     private let maxSidebarWidth: CGFloat = 400
 
     var body: some View {
+        ZStack {
+            // Solid theme color extending under the (transparent) title bar
+            // and behind every pane. The pane backgrounds paint over this
+            // for the rest of the window, so all that's left visible from
+            // this layer is the strip behind the unified title-bar/toolbar.
+            themes.current.background
+                .ignoresSafeArea()
+            layoutBody
+        }
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        .toolbarColorScheme(themes.current.isDark ? .dark : .light, for: .windowToolbar)
+        .preferredColorScheme(themes.current.isDark ? .dark : .light)
+        .background(WindowAccessor { window in
+            applyThemeToWindow(window)
+        })
+        .onChange(of: themes.current.id) { _ in
+            for window in NSApp.windows { applyThemeToWindow(window) }
+        }
+    }
+
+    /// HStack + toolbar + every notification / lifecycle handler. Split out
+    /// from `body` because the full modifier chain blew the SwiftUI
+    /// type-checker's expression-complexity budget when theming modifiers
+    /// were stacked on top.
+    private var layoutBody: some View {
         HStack(spacing: 0) {
             sidebar
                 .frame(width: sidebarWidth)
@@ -180,71 +217,25 @@ struct ContentView: View {
         }
         .animation(.easeOut(duration: 0.22), value: inspectorVisible)
         .navigationTitle(selectedEntry?.filename ?? "mdv")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(action: openFileDialog) {
-                    Image(systemName: "plus")
-                }
-                .help("Open file (⌘O)")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                themeMenu
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    addBookmarkAtCurrentSpot()
-                } label: {
-                    Image(systemName: hasAnyBookmarkForCurrentFile ? "bookmark.fill" : "bookmark")
-                        .foregroundStyle(hasAnyBookmarkForCurrentFile ? Color.accentColor : Color.primary)
-                }
-                .help("Bookmark Current Spot (⌘D)")
-                .disabled(selectedEntry == nil)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    inspectorVisible.toggle()
-                    if inspectorVisible { bookmarks.refreshFileExistence() }
-                } label: {
-                    Image(systemName: "sidebar.right")
-                        .foregroundStyle(inspectorVisible ? Color.accentColor : Color.primary)
-                }
-                .help("Toggle Inspector (⌥⌘0)")
-                .keyboardShortcut("0", modifiers: [.command, .option])
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openFile)) { _ in
-            openFileDialog()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openFileInNewWindow)) { _ in
-            openFileDialogInNewWindow()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openURLInWindow)) { notif in
-            if let url = notif.object as? URL {
-                loadFile(url)
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .findInDocument)) { _ in
-            if shouldRouteToGlobalSearch() {
-                focusGlobalSearch()
-            } else {
-                openFind()
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .searchHistory)) { _ in
-            focusGlobalSearch()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .toggleBookmark)) { _ in
-            addBookmarkAtCurrentSpot()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .openBookmarkSlot)) { notif in
-            if let n = notif.object as? Int { openBookmarkSlot(n) }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .setPlaceholder)) { _ in
-            setPlaceholder()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .jumpToPlaceholder)) { _ in
-            jumpToPlaceholder()
-        }
+        .toolbar { toolbarContent }
+        .modifier(NotificationHandlers(
+            openFile: openFileDialog,
+            openFileInNewWindow: openFileDialogInNewWindow,
+            openURLInWindow: { url in loadFile(url) },
+            findInDocument: {
+                if shouldRouteToGlobalSearch() { focusGlobalSearch() } else { openFind() }
+            },
+            searchHistory: focusGlobalSearch,
+            toggleBookmark: addBookmarkAtCurrentSpot,
+            openBookmarkSlot: { n in openBookmarkSlot(n) },
+            setPlaceholder: setPlaceholder,
+            jumpToPlaceholder: jumpToPlaceholder,
+            chooseExternalEditor: pickEditor,
+            openInExternalEditor: {
+                if editorAppPath.isEmpty { pickEditor() } else { openCurrentFileInEditor() }
+            },
+            forgetExternalEditor: { editorAppPath = "" }
+        ))
         .onOpenURL { url in
             loadFile(url)
         }
@@ -304,14 +295,87 @@ struct ContentView: View {
         }
     }
 
+    /// Pushes the current theme into the host NSWindow. We let SwiftUI's
+    /// `.toolbarBackground(...)` paint the unified title-bar/toolbar strip,
+    /// and use the AppKit window only for things SwiftUI can't reach:
+    ///
+    /// - solid `backgroundColor` so empty regions / window edges show theme
+    ///   instead of the desktop bleeding through
+    /// - `appearance` so the traffic-light buttons and any remaining
+    ///   system-tinted chrome flip with the theme's light/dark preference
+    private func applyThemeToWindow(_ window: NSWindow) {
+        let theme = themes.current
+        let bg = NSColor(theme.background)
+
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
+        window.isOpaque = true
+        window.backgroundColor = bg
+        window.appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
+
+        // SwiftUI's `.toolbarBackground(.hidden, for: .windowToolbar)`
+        // only hides the *material*; the underlying NSView for the title
+        // bar / toolbar strip is still opaque, paints itself with the
+        // system frame color, and covers everything we did above. Force
+        // its backing layer to the theme color so the strip actually
+        // matches the rest of the window.
+        //
+        // The titlebar container view holds the traffic-light area AND
+        // the toolbar items, so coloring it once handles the whole
+        // unified strip. Walked from `closeButton.superview.superview`
+        // because Apple's view-hierarchy class names (`_NSTitlebarView`,
+        // `_NSTitlebarContainerView`) are private — the relative path is
+        // the stable handle.
+        if let titlebar = window.standardWindowButton(.closeButton)?.superview,
+           let container = titlebar.superview {
+            container.wantsLayer = true
+            container.layer?.backgroundColor = bg.cgColor
+            titlebar.wantsLayer = true
+            titlebar.layer?.backgroundColor = bg.cgColor
+        }
+    }
+
     // MARK: - Sidebar
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            sidebarSearchField
-                .padding(.horizontal, 10)
-                .padding(.top, 10)
-                .padding(.bottom, 8)
+            HStack(spacing: 0) {
+                Text("History")
+                    .font(.system(size: 11, weight: .semibold))
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+                    .foregroundStyle(themes.current.tertiaryText)
+                Spacer()
+                if !globalSearchVisible {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.20)) {
+                            globalSearchVisible = true
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            globalSearchFocused = true
+                        }
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(themes.current.tertiaryText)
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Search history")
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
+
+            if globalSearchVisible {
+                sidebarSearchField
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
 
             if !globalQuery.isEmpty {
                 globalSearchResults
@@ -321,38 +385,42 @@ struct ContentView: View {
                 historyList
             }
         }
-        .background(
-            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
-                .overlay(themes.current.sidebarTint.opacity(themes.current.sidebarTintOpacity))
-        )
+        .background(themes.current.secondaryBackground)
+        .environment(\.colorScheme, themes.current.isDark ? .dark : .light)
+        .tint(themes.current.accent)
+    }
+
+    private func closeSidebarSearch() {
+        clearGlobalSearch()
+        withAnimation(.easeOut(duration: 0.20)) {
+            globalSearchVisible = false
+        }
     }
 
     private var historyList: some View {
         List(selection: $selectedEntry) {
-            Section("History") {
-                ForEach(history.entries) { entry in
-                    sidebarRow(entry)
-                        .tag(entry)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                delete(entry)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                            .tint(.red)
+            ForEach(history.entries) { entry in
+                sidebarRow(entry)
+                    .tag(entry)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) {
+                            delete(entry)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
                         }
-                        .contextMenu {
-                            Button("Reveal in Finder") {
-                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: entry.path)])
-                            }
-                            Divider()
-                            Button(role: .destructive) {
-                                delete(entry)
-                            } label: {
-                                Text("Remove from History")
-                            }
+                        .tint(.red)
+                    }
+                    .contextMenu {
+                        Button("Reveal in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: entry.path)])
                         }
-                }
+                        Divider()
+                        Button(role: .destructive) {
+                            delete(entry)
+                        } label: {
+                            Text("Remove from History")
+                        }
+                    }
             }
         }
         .listStyle(.sidebar)
@@ -365,38 +433,35 @@ struct ContentView: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(themes.current.secondaryText)
             TextField("Search history", text: $globalQuery)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
+                .foregroundStyle(themes.current.text)
                 .focused($globalSearchFocused)
                 .onSubmit {
                     if let first = globalHits.first { openHit(first) }
                 }
                 .onExitCommand {
-                    clearGlobalSearch()
+                    closeSidebarSearch()
                 }
-            if !globalQuery.isEmpty {
-                Button {
-                    clearGlobalSearch()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .help("Clear (esc)")
+            Button(action: closeSidebarSearch) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(themes.current.tertiaryText)
             }
+            .buttonStyle(.plain)
+            .help("Close (esc)")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.primary.opacity(globalSearchFocused ? 0.10 : 0.06))
+                .fill(themes.current.text.opacity(globalSearchFocused ? 0.10 : 0.06))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(globalSearchFocused ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+                .stroke(globalSearchFocused ? themes.current.accent.opacity(0.5) : Color.clear, lineWidth: 1)
         )
         .animation(.easeOut(duration: 0.12), value: globalSearchFocused)
         .onChange(of: globalQuery) { _ in runGlobalSearch() }
@@ -579,7 +644,16 @@ struct ContentView: View {
     }
 
     private func focusGlobalSearch() {
-        globalSearchFocused = true
+        if !globalSearchVisible {
+            withAnimation(.easeOut(duration: 0.20)) {
+                globalSearchVisible = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                globalSearchFocused = true
+            }
+        } else {
+            globalSearchFocused = true
+        }
     }
 
     /// Cmd-F is context-sensitive: if the user is currently working inside the sidebar
@@ -594,16 +668,17 @@ struct ContentView: View {
         HStack(spacing: 8) {
             Image(systemName: "doc.text")
                 .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(themes.current.secondaryText)
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.filename)
                     .font(.system(size: 13))
+                    .foregroundStyle(themes.current.text)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(prettyPath(entry.path))
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(themes.current.secondaryText)
                     .lineLimit(1)
                     .truncationMode(.head)
             }
@@ -643,6 +718,39 @@ struct ContentView: View {
 
     // MARK: - Theme Menu (toolbar)
 
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Button(action: openFileDialog) {
+                Image(systemName: "plus")
+            }
+            .help("Open file (⌘O)")
+        }
+        ToolbarItem(placement: .primaryAction) { editButton }
+        ToolbarItem(placement: .primaryAction) { themeMenu }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                addBookmarkAtCurrentSpot()
+            } label: {
+                Image(systemName: hasAnyBookmarkForCurrentFile ? "bookmark.fill" : "bookmark")
+                    .foregroundStyle(hasAnyBookmarkForCurrentFile ? Color.accentColor : Color.primary)
+            }
+            .help("Bookmark Current Spot (⌘D)")
+            .disabled(selectedEntry == nil)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                inspectorVisible.toggle()
+                if inspectorVisible { bookmarks.refreshFileExistence() }
+            } label: {
+                Image(systemName: "sidebar.right")
+                    .foregroundStyle(inspectorVisible ? Color.accentColor : Color.primary)
+            }
+            .help("Toggle Inspector (⌥⌘0)")
+            .keyboardShortcut("0", modifiers: [.command, .option])
+        }
+    }
+
     /// Toolbar pop-up menu for switching the document theme. Shows a paintpalette
     /// icon (no label) so it stays visually unobtrusive next to the other toolbar
     /// glyphs; the popup itself shows full theme names with a checkmark on the
@@ -669,6 +777,80 @@ struct ContentView: View {
         .help("Theme: \(themes.current.name)")
     }
 
+    // MARK: - External editor
+
+    /// Toolbar button that opens the current file in the user's chosen
+    /// external editor. First click (no editor saved yet) pops the picker;
+    /// afterwards the choice is remembered in `@AppStorage`. The picker
+    /// itself lives in the File menu so the toolbar stays single-purpose.
+    private var editButton: some View {
+        Button {
+            if editorAppPath.isEmpty {
+                pickEditor()
+            } else {
+                openCurrentFileInEditor()
+            }
+        } label: {
+            Image(systemName: "pencil")
+        }
+        .disabled(!editorAppPath.isEmpty && selectedEntry == nil)
+        .help(editorAppPath.isEmpty
+              ? "Edit (choose an external editor)"
+              : "Edit in \(editorDisplayName(forAppPath: editorAppPath))")
+    }
+
+    private func editorDisplayName(forAppPath path: String) -> String {
+        let url = URL(fileURLWithPath: path)
+        if let bundle = Bundle(url: url),
+           let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName")
+                       ?? bundle.object(forInfoDictionaryKey: "CFBundleName")) as? String {
+            return name
+        }
+        return url.deletingPathExtension().lastPathComponent
+    }
+
+    private func pickEditor() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose External Editor"
+        panel.message = "Pick an application to edit Markdown files in."
+        panel.prompt = "Choose"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        if panel.runModal() == .OK, let url = panel.url {
+            editorAppPath = url.path
+            // If the user picked while a file is open, jump straight in —
+            // it's what they were trying to do anyway.
+            if selectedEntry != nil { openCurrentFileInEditor() }
+        }
+    }
+
+    private func openCurrentFileInEditor() {
+        guard let entry = selectedEntry else { return }
+        guard !editorAppPath.isEmpty else { pickEditor(); return }
+        let appURL = URL(fileURLWithPath: editorAppPath)
+        let fileURL = URL(fileURLWithPath: entry.path)
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        NSWorkspace.shared.open([fileURL], withApplicationAt: appURL, configuration: cfg) { _, error in
+            if let error = error {
+                NSLog("[mdv] failed to open in editor: \(error)")
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn't open in external editor"
+                    alert.informativeText = error.localizedDescription
+                    alert.addButton(withTitle: "Choose Different Editor…")
+                    alert.addButton(withTitle: "Cancel")
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        self.pickEditor()
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Drag Handle
 
     private var dragHandle: some View {
@@ -677,7 +859,7 @@ struct ContentView: View {
                 .frame(width: 8)
                 .contentShape(Rectangle())
             Rectangle()
-                .fill(dragHandleHovered ? Color.accentColor.opacity(0.5) : Color.black.opacity(0.08))
+                .fill(dragHandleHovered ? themes.current.accent.opacity(0.5) : themes.current.divider)
                 .frame(width: dragHandleHovered ? 2 : 1)
                 .animation(.easeInOut(duration: 0.15), value: dragHandleHovered)
         }
@@ -705,9 +887,7 @@ struct ContentView: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { (idx, block) in
-                                Markdown(block)
-                                    .markdownTheme(themes.current.markdownTheme)
-                                    .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
+                                blockView(block: block, idx: idx)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(
@@ -780,6 +960,29 @@ struct ContentView: View {
         }
         .background(themes.current.background)
         .environment(\.colorScheme, themes.current.isDark ? .dark : .light)
+        .overlay(alignment: .topTrailing) {
+            if !isSearching {
+                Button {
+                    openFind()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(themes.current.secondaryText)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            Circle().fill(themes.current.secondaryBackground)
+                        )
+                        .overlay(
+                            Circle().stroke(themes.current.border, lineWidth: 0.5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 10)
+                .padding(.trailing, 12)
+                .help("Find in document (⌘F)")
+                .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+        }
         .overlay(alignment: .top) {
             if isSearching {
                 findBar
@@ -788,6 +991,7 @@ struct ContentView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .animation(.easeOut(duration: 0.20), value: isSearching)
     }
 
     private var blocks: [String] {
@@ -867,6 +1071,17 @@ struct ContentView: View {
         return result
     }
 
+    /// `tocHeadings`, optionally narrowed to entries matching `tocSearchQuery`
+    /// (case-/diacritic-insensitive substring on the heading text). Empty
+    /// query passes everything through.
+    private var filteredTocHeadings: [TOCHeading] {
+        let q = tocSearchQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return tocHeadings }
+        return tocHeadings.filter {
+            $0.text.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        }
+    }
+
     private func stripInlineMarkdown(_ s: String) -> String {
         var out = s
         // Trailing #'s of ATX headings
@@ -907,10 +1122,9 @@ struct ContentView: View {
                 }
             }
         }
-        .background(
-            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
-                .overlay(themes.current.sidebarTint.opacity(themes.current.sidebarTintOpacity))
-        )
+        .background(themes.current.secondaryBackground)
+        .environment(\.colorScheme, themes.current.isDark ? .dark : .light)
+        .tint(themes.current.accent)
     }
 
     private func clampedBookmarksHeight(total: CGFloat) -> CGFloat {
@@ -929,7 +1143,7 @@ struct ContentView: View {
                 .frame(height: 12)
                 .contentShape(Rectangle())
             Rectangle()
-                .fill(bookmarksDividerHovered ? Color.accentColor.opacity(0.5) : Color.black.opacity(0.08))
+                .fill(bookmarksDividerHovered ? themes.current.accent.opacity(0.5) : themes.current.divider)
                 .frame(height: bookmarksDividerHovered ? 2 : 1)
                 .animation(.easeInOut(duration: 0.15), value: bookmarksDividerHovered)
         }
@@ -957,29 +1171,67 @@ struct ContentView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(0.6)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(themes.current.tertiaryText)
                 Spacer()
+                if !tocSearchVisible {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.20)) {
+                            tocSearchVisible = true
+                        }
+                        // Focus once the field has appeared. Without the
+                        // delay SwiftUI hands the focus request to a view
+                        // that doesn't yet exist and the field stays cold.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            tocSearchFocused = true
+                        }
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(themes.current.tertiaryText)
+                            .frame(width: 18, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Filter headings")
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
             }
             .padding(.horizontal, 14)
             .padding(.top, 14)
             .padding(.bottom, 6)
+
+            if tocSearchVisible {
+                tocSearchField
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
 
             if tocHeadings.isEmpty {
                 VStack(spacing: 8) {
                     Spacer()
                     Image(systemName: "list.bullet.indent")
                         .font(.system(size: 24, weight: .light))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(themes.current.tertiaryText)
                     Text("No headings")
                         .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(themes.current.secondaryText)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filteredTocHeadings.isEmpty {
+                VStack(spacing: 6) {
+                    Spacer()
+                    Text("No matches")
+                        .font(.system(size: 12))
+                        .foregroundStyle(themes.current.secondaryText)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 1) {
-                        ForEach(tocHeadings) { heading in
+                        ForEach(filteredTocHeadings) { heading in
                             tocRow(heading)
                         }
                     }
@@ -990,29 +1242,68 @@ struct ContentView: View {
         }
     }
 
+    private var tocSearchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(themes.current.secondaryText)
+            TextField("Filter headings", text: $tocSearchQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(themes.current.text)
+                .focused($tocSearchFocused)
+                .onExitCommand { closeTocSearch() }
+            Button(action: closeTocSearch) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(themes.current.tertiaryText)
+            }
+            .buttonStyle(.plain)
+            .help("Close (esc)")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(themes.current.text.opacity(tocSearchFocused ? 0.10 : 0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(tocSearchFocused ? themes.current.accent.opacity(0.5) : Color.clear, lineWidth: 1)
+        )
+    }
+
+    private func closeTocSearch() {
+        tocSearchQuery = ""
+        tocSearchFocused = false
+        withAnimation(.easeOut(duration: 0.20)) {
+            tocSearchVisible = false
+        }
+    }
+
     // MARK: - Bookmarks pane
 
     private var bookmarksHeader: some View {
         HStack(spacing: 6) {
             Image(systemName: bookmarksExpandedRaw ? "chevron.down" : "chevron.right")
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(themes.current.tertiaryText)
                 .frame(width: 10)
             Text("Bookmarks")
                 .font(.system(size: 11, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(0.6)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(themes.current.tertiaryText)
             Spacer()
             if !bookmarks.bookmarks.isEmpty {
                 Text("\(bookmarks.bookmarks.count)")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(themes.current.tertiaryText)
                     .monospacedDigit()
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(
-                        Capsule().fill(Color.primary.opacity(0.06))
+                        Capsule().fill(themes.current.text.opacity(0.06))
                     )
             }
         }
@@ -1263,6 +1554,16 @@ struct ContentView: View {
         let isCurrent = tocSelectedBlock == heading.blockIndex
         let isHovered = hoveredHeading == heading.blockIndex
         let leadingIndent: CGFloat = CGFloat(heading.level - 1) * 14
+        let theme = themes.current
+        let foreground: Color = {
+            if isCurrent { return theme.background }
+            return heading.level == 1 ? theme.text : theme.secondaryText
+        }()
+        let rowBackground: Color = {
+            if isCurrent { return theme.accent }
+            if isHovered { return theme.text.opacity(0.08) }
+            return .clear
+        }()
 
         return Button {
             tocSelectedBlock = heading.blockIndex
@@ -1272,7 +1573,7 @@ struct ContentView: View {
                 Spacer().frame(width: leadingIndent)
                 Text(heading.text)
                     .font(.system(size: 12, weight: heading.level == 1 ? .semibold : .regular))
-                    .foregroundStyle(isCurrent ? Color.white : (heading.level == 1 ? Color.primary : Color.secondary))
+                    .foregroundStyle(foreground)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
@@ -1282,7 +1583,7 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(isCurrent ? Color.accentColor : (isHovered ? Color.primary.opacity(0.06) : Color.clear))
+                    .fill(rowBackground)
             )
             .contentShape(RoundedRectangle(cornerRadius: 4))
         }
@@ -1355,6 +1656,85 @@ struct ContentView: View {
         .onChange(of: query) { _ in
             recomputeMatches()
         }
+    }
+
+    /// Renders one markdown block. If find is active and the block contains
+    /// a hit AND the block's structure is one we can losslessly re-render
+    /// inline (paragraph / heading / list / blockquote — i.e. not code or
+    /// table), swap MarkdownUI for an AttributedString-based Text so we
+    /// can paint a yellow highlight on the matched substrings themselves.
+    /// Other blocks keep MarkdownUI's full rendering and rely on the
+    /// block-level tint for find feedback.
+    @ViewBuilder
+    private func blockView(block: String, idx: Int) -> some View {
+        if shouldInlineHighlight(block: block, idx: idx) {
+            Text(highlightedAttributedString(for: block, idx: idx))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Markdown(block)
+                .markdownTheme(themes.current.markdownTheme)
+                .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
+        }
+    }
+
+    private func shouldInlineHighlight(block: String, idx: Int) -> Bool {
+        guard isSearching, !query.isEmpty else { return false }
+        guard matches.contains(where: { $0.blockIndex == idx }) else { return false }
+        let trimmed = block.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") { return false }
+        // Crude table detection: header row of pipes followed by an alignment row.
+        let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.count >= 2,
+           lines[0].contains("|"),
+           lines[1].allSatisfy({ "-:| ".contains($0) }) {
+            return false
+        }
+        return true
+    }
+
+    private func highlightedAttributedString(for block: String, idx: Int) -> AttributedString {
+        let theme = themes.current
+        let isCurrentBlock = matches.indices.contains(currentMatchIndex)
+                          && matches[currentMatchIndex].blockIndex == idx
+
+        // Strip block-level markers per line so the inline render reads
+        // cleanly. Lists keep a literal bullet so the user sees the list
+        // shape; headings/blockquotes/numbered lists drop the marker.
+        let cleaned = block.components(separatedBy: "\n").map { line -> String in
+            var l = line
+            l = l.replacingOccurrences(of: #"^#{1,6}\s+"#, with: "", options: .regularExpression)
+            l = l.replacingOccurrences(of: #"^>\s?"#, with: "", options: .regularExpression)
+            l = l.replacingOccurrences(of: #"^[-*+]\s+"#, with: "• ", options: .regularExpression)
+            l = l.replacingOccurrences(of: #"^\d+\.\s+"#, with: "", options: .regularExpression)
+            return l
+        }.joined(separator: "\n")
+
+        var attr: AttributedString
+        do {
+            attr = try AttributedString(
+                markdown: cleaned,
+                options: AttributedString.MarkdownParsingOptions(
+                    allowsExtendedAttributes: true,
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace
+                )
+            )
+        } catch {
+            attr = AttributedString(cleaned)
+        }
+        attr.foregroundColor = NSColor(theme.text)
+
+        // Highlight each occurrence of the query. Current-match block gets
+        // a stronger yellow so the navigation focus is obvious.
+        let alpha = isCurrentBlock ? 0.55 : 0.32
+        let highlight = NSColor.systemYellow.withAlphaComponent(alpha)
+        var cursor = attr.startIndex
+        while cursor < attr.endIndex,
+              let range = attr[cursor...].range(of: query, options: .caseInsensitive) {
+            attr[range].backgroundColor = highlight
+            cursor = range.upperBound
+        }
+        return attr
     }
 
     private func recomputeMatches() {
@@ -1521,8 +1901,49 @@ struct ContentView: View {
     }
 
     private func loadFile(_ url: URL) {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+        if isDir.boolValue {
+            loadDirectory(url)
+            return
+        }
         guard FileManager.default.isReadableFile(atPath: url.path) else { return }
         let entry = history.add(path: url.path)
+        selectedEntry = entry
+    }
+
+    /// When opened with a directory: pick README.md (case-insensitive) — or
+    /// the alphabetically-first markdown file if there is no README — as the
+    /// document to render, and seed history with the rest of the directory's
+    /// markdown files so the sidebar surfaces them as siblings.
+    private func loadDirectory(_ url: URL) {
+        let exts: Set<String> = ["md", "markdown", "mdown"]
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let mdFiles = contents
+            .filter { exts.contains($0.pathExtension.lowercased()) }
+            .filter { fm.isReadableFile(atPath: $0.path) }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+
+        guard !mdFiles.isEmpty else { return }
+
+        let primary = mdFiles.first {
+            $0.deletingPathExtension().lastPathComponent.caseInsensitiveCompare("README") == .orderedSame
+        } ?? mdFiles[0]
+
+        // Seed siblings into history first (in reverse-alpha order, so once
+        // each insert prepends, they end up alphabetical underneath the
+        // primary). Primary is added last so it lands at the top.
+        let siblings = mdFiles.filter { $0 != primary }.reversed()
+        for sibling in siblings {
+            _ = history.add(path: sibling.path)
+        }
+        let entry = history.add(path: primary.path)
         selectedEntry = entry
     }
 
@@ -1709,6 +2130,7 @@ struct ContentView: View {
     private func loadCurrentEntry() {
         guard let entry = selectedEntry else {
             rawMarkdown = ""
+            fileWatcher.cancel()
             return
         }
         let url = URL(fileURLWithPath: entry.path)
@@ -1716,6 +2138,18 @@ struct ContentView: View {
             rawMarkdown = content
         } else {
             rawMarkdown = ""
+        }
+        // Re-arm the watcher for the (possibly new) selected file so an
+        // external editor saving the file pushes the changes back into
+        // the viewer without the user having to reopen.
+        let watchedPath = entry.path
+        fileWatcher.watch(path: watchedPath) {
+            // Still on the same entry? Re-read from disk.
+            guard let current = self.selectedEntry, current.path == watchedPath else { return }
+            let fresh = (try? String(contentsOfFile: watchedPath, encoding: .utf8)) ?? ""
+            if fresh != self.rawMarkdown {
+                self.rawMarkdown = fresh
+            }
         }
     }
 
@@ -1822,5 +2256,157 @@ struct VisualEffectView: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.material = material
         nsView.blendingMode = blendingMode
+    }
+}
+
+// MARK: - Window accessor
+
+/// Hands the host NSWindow back to a SwiftUI closure once it's attached,
+/// and again on every `updateNSView`. Used to push theme-derived
+/// background / appearance / titlebar settings down to the AppKit window
+/// since SwiftUI's Scene-level styling can't reach those properties.
+struct WindowAccessor: NSViewRepresentable {
+    let onWindow: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        // .window is nil at make-time; defer to the next runloop tick so
+        // SwiftUI has hooked the view into the window hierarchy.
+        DispatchQueue.main.async {
+            if let window = view.window { onWindow(window) }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if let window = nsView.window { onWindow(window) }
+        }
+    }
+}
+
+// MARK: - Notification handlers
+
+/// Bundles every NotificationCenter publisher the main view subscribes to
+/// into a single ViewModifier. Splitting these out of `body` keeps the
+/// SwiftUI expression below the type-checker's complexity budget — the
+/// modifier chain lives inside `body(content:)` instead of dangling off
+/// the `HStack`.
+private struct NotificationHandlers: ViewModifier {
+    let openFile: () -> Void
+    let openFileInNewWindow: () -> Void
+    let openURLInWindow: (URL) -> Void
+    let findInDocument: () -> Void
+    let searchHistory: () -> Void
+    let toggleBookmark: () -> Void
+    let openBookmarkSlot: (Int) -> Void
+    let setPlaceholder: () -> Void
+    let jumpToPlaceholder: () -> Void
+    let chooseExternalEditor: () -> Void
+    let openInExternalEditor: () -> Void
+    let forgetExternalEditor: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .openFile)) { _ in openFile() }
+            .onReceive(NotificationCenter.default.publisher(for: .openFileInNewWindow)) { _ in openFileInNewWindow() }
+            .onReceive(NotificationCenter.default.publisher(for: .openURLInWindow)) { notif in
+                if let url = notif.object as? URL { openURLInWindow(url) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .findInDocument)) { _ in findInDocument() }
+            .onReceive(NotificationCenter.default.publisher(for: .searchHistory)) { _ in searchHistory() }
+            .onReceive(NotificationCenter.default.publisher(for: .toggleBookmark)) { _ in toggleBookmark() }
+            .onReceive(NotificationCenter.default.publisher(for: .openBookmarkSlot)) { notif in
+                if let n = notif.object as? Int { openBookmarkSlot(n) }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .setPlaceholder)) { _ in setPlaceholder() }
+            .onReceive(NotificationCenter.default.publisher(for: .jumpToPlaceholder)) { _ in jumpToPlaceholder() }
+            .onReceive(NotificationCenter.default.publisher(for: .chooseExternalEditor)) { _ in chooseExternalEditor() }
+            .onReceive(NotificationCenter.default.publisher(for: .openInExternalEditor)) { _ in openInExternalEditor() }
+            .onReceive(NotificationCenter.default.publisher(for: .forgetExternalEditor)) { _ in forgetExternalEditor() }
+    }
+}
+
+// MARK: - File watcher
+
+/// Watches a single file path on disk and runs a callback on the main
+/// queue whenever it changes (write, atomic rename-replace, deletion,
+/// attribute change). Built on FSEvents — a path-based API that watches
+/// the parent directory and reports per-file events, so atomic-rename
+/// saves (VSCode, BBEdit, Sublime, Vim with backup) are handled
+/// naturally without re-opening file descriptors.
+final class FileWatcher {
+    private var stream: FSEventStreamRef?
+    fileprivate var onChange: (() -> Void)?
+    fileprivate var watchedPathResolved: String = ""
+
+    deinit { cancel() }
+
+    func watch(path: String, _ onChange: @escaping () -> Void) {
+        cancel()
+        // Resolve symlinks once up front so the FSEvents callback can
+        // compare paths cheaply. macOS frequently rewrites `/tmp` →
+        // `/private/tmp` and editors that save to a canonical path will
+        // fire events with the rewritten form.
+        let resolved = (path as NSString).resolvingSymlinksInPath
+        self.watchedPathResolved = resolved
+        self.onChange = onChange
+
+        let dir = (resolved as NSString).deletingLastPathComponent
+        guard !dir.isEmpty else { return }
+
+        var context = FSEventStreamContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+        let flags = UInt32(
+            kFSEventStreamCreateFlagFileEvents |
+            kFSEventStreamCreateFlagNoDefer |
+            kFSEventStreamCreateFlagUseCFTypes
+        )
+        let callback: FSEventStreamCallback = { _, info, _, paths, _, _ in
+            guard let info = info else { return }
+            let watcher = Unmanaged<FileWatcher>.fromOpaque(info).takeUnretainedValue()
+            let array = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as NSArray
+            let target = watcher.watchedPathResolved
+            var matched = false
+            for case let raw as String in array {
+                if (raw as NSString).resolvingSymlinksInPath == target {
+                    matched = true
+                    break
+                }
+            }
+            guard matched, let onChange = watcher.onChange else { return }
+            DispatchQueue.main.async(execute: onChange)
+        }
+
+        guard let created = FSEventStreamCreate(
+            nil,
+            callback,
+            &context,
+            [dir] as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.05,                // 50ms coalescing — fast enough to feel "immediate"
+            flags
+        ) else {
+            return
+        }
+        FSEventStreamSetDispatchQueue(created, DispatchQueue.main)
+        FSEventStreamStart(created)
+        self.stream = created
+    }
+
+    func cancel() {
+        if let s = stream {
+            FSEventStreamStop(s)
+            FSEventStreamInvalidate(s)
+            FSEventStreamRelease(s)
+            stream = nil
+        }
+        onChange = nil
+        watchedPathResolved = ""
     }
 }

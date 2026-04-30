@@ -1,144 +1,86 @@
 # mdv — Markdown Viewer
 #
 # Quick start:
-#   make           # checks prerequisites, then debug-builds into ./build/
+#   make           # checks prerequisites, then debug-builds via SwiftPM into ./build/mdv.app
 #   make run       # build + launch
-#   make install   # copy to /Applications/ and register with LaunchServices
+#   make install   # copy to /Applications/, register, and symlink CLI to /usr/local/bin/mdv
 #   make help      # full target list
 #
-# `make` always runs the prerequisite checks first, so a fresh clone gets
-# actionable errors (missing Xcode, license unaccepted, etc.) instead of a
-# wall of xcodebuild output.
+# Build is driven by `swift build` + ./build.sh — no Xcode IDE required.
 
-PROJECT      := mdv.xcodeproj
-SCHEME       := mdv
-CONFIG       := Debug
-DERIVED      := build
-BUILT_DIR    := $(DERIVED)/Build/Products/$(CONFIG)
-APP          := $(BUILT_DIR)/mdv.app
+CONFIG       := debug
+APP          := build/mdv.app
+CLI_SRC      := bin/mdv
+CLI_DST      := /usr/local/bin/mdv
 ICON_SRC     := MDV.png
 ICON_DST     := mdv/AppIcon.icns
 LSREGISTER   := /System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister
 MIN_MACOS    := 13
-MIN_XCODE    := 14
+MIN_SWIFT    := 5.9
 
-.PHONY: all deps build release run clean install register icon help
+.PHONY: all deps build release run clean install install-cli uninstall register icon help
 
 all: build
 
 help:
 	@echo "Targets:"
-	@echo "  make / build  Build $(CONFIG) into ./$(DERIVED)/  (default)"
-	@echo "  release       Build Release into ./$(DERIVED)/"
+	@echo "  make / build  Build $(CONFIG) into ./$(APP)  (default)"
+	@echo "  release       Build release into ./$(APP)"
 	@echo "  run           Build and launch mdv"
-	@echo "  clean         Remove ./$(DERIVED)/ and ./build_icon/"
-	@echo "  install       Copy mdv.app to /Applications/ + refresh LaunchServices"
-	@echo "  register      Refresh LaunchServices for ./$(BUILT_DIR)/mdv.app"
+	@echo "  clean         Remove ./build/ and ./.build/"
+	@echo "  install       Copy mdv.app to /Applications/, register it, symlink CLI"
+	@echo "  install-cli   Symlink $(CLI_SRC) → $(CLI_DST) (sudo)"
+	@echo "  uninstall     Remove /Applications/mdv.app and $(CLI_DST)"
+	@echo "  register      Refresh LaunchServices for ./$(APP)"
 	@echo "  icon          Regenerate $(ICON_DST) from $(ICON_SRC)"
 	@echo "  deps          Verify build prerequisites (run automatically before build)"
 	@echo "  help          Show this message"
 
 # ---------------------------------------------------------------------------
 # Prerequisite checks
-# Designed to give the next-most-useful error message at every step, so a
-# fresh clone produces actionable guidance instead of cryptic xcodebuild output.
 # ---------------------------------------------------------------------------
 
 deps:
 	@echo "→ Checking build prerequisites..."
-	@# --- macOS version ---
 	@OS_VERSION=$$(sw_vers -productVersion 2>/dev/null); \
 	if [ -z "$$OS_VERSION" ]; then \
-	  echo "  ✗ Could not detect macOS version (sw_vers failed). mdv only builds on macOS."; exit 1; \
+	  echo "  ✗ Could not detect macOS version. mdv only builds on macOS."; exit 1; \
 	fi; \
 	OS_MAJOR=$$(echo $$OS_VERSION | cut -d. -f1); \
 	if [ $$OS_MAJOR -lt $(MIN_MACOS) ]; then \
 	  echo "  ✗ macOS $$OS_VERSION — mdv requires macOS $(MIN_MACOS).0 or newer."; exit 1; \
 	fi; \
 	echo "  ✓ macOS $$OS_VERSION"
-	@# --- xcode-select active developer dir ---
-	@XCODE_PATH=$$(xcode-select -p 2>/dev/null); \
-	if [ -z "$$XCODE_PATH" ]; then \
-	  echo "  ✗ No active Xcode developer directory set."; \
-	  echo "    Install Xcode from the App Store, then run:"; \
-	  echo "        sudo xcode-select -s /Applications/Xcode.app"; \
+	@command -v swift >/dev/null 2>&1 || { \
+	  echo "  ✗ swift not on PATH. Install Xcode (App Store) or the Swift toolchain"; \
+	  echo "    from https://swift.org/install/macos/, then re-run."; exit 1; }
+	@SW_LINE=$$(swift --version 2>&1 | head -1); \
+	echo "  ✓ $$SW_LINE"
+	@if [ ! -f Package.swift ]; then \
+	  echo "  ✗ Package.swift not found in $$(pwd). Run make from the repo root."; \
 	  exit 1; \
 	fi; \
-	case "$$XCODE_PATH" in \
-	  *CommandLineTools*) \
-	    echo "  ✗ xcode-select points to Command Line Tools, not a full Xcode install:"; \
-	    echo "        $$XCODE_PATH"; \
-	    echo "    Command Line Tools cannot build .app bundles. Install Xcode from the"; \
-	    echo "    App Store, then run:"; \
-	    echo "        sudo xcode-select -s /Applications/Xcode.app"; \
-	    exit 1;; \
-	esac; \
-	echo "  ✓ developer dir: $$XCODE_PATH"
-	@# --- xcodebuild on PATH and operational ---
-	@command -v xcodebuild >/dev/null 2>&1 || { \
-	  echo "  ✗ xcodebuild not on PATH. Install Xcode from the App Store."; exit 1; }
-	@XB_OUT=$$(xcodebuild -version 2>&1); XB_RC=$$?; \
-	if [ $$XB_RC -ne 0 ]; then \
-	  if echo "$$XB_OUT" | grep -qi license; then \
-	    echo "  ✗ The Xcode license has not been accepted. Run:"; \
-	    echo "        sudo xcodebuild -license accept"; \
-	  elif echo "$$XB_OUT" | grep -qi "first launch"; then \
-	    echo "  ✗ Xcode needs first-launch setup. Run:"; \
-	    echo "        sudo xcodebuild -runFirstLaunch"; \
-	  else \
-	    echo "  ✗ xcodebuild is not operational:"; \
-	    echo "$$XB_OUT" | sed 's/^/      /'; \
-	  fi; \
-	  exit 1; \
+	echo "  ✓ Package.swift present"
+	@if [ ! -x ./build.sh ]; then \
+	  echo "  ✗ ./build.sh missing or not executable."; exit 1; \
 	fi; \
-	XB_LINE=$$(echo "$$XB_OUT" | head -1); \
-	XB_MAJOR=$$(echo $$XB_LINE | sed -E 's/Xcode ([0-9]+).*/\1/'); \
-	if [ -n "$$XB_MAJOR" ] && [ $$XB_MAJOR -lt $(MIN_XCODE) ] 2>/dev/null; then \
-	  echo "  ✗ $$XB_LINE — mdv's project format needs Xcode $(MIN_XCODE).0 or newer."; \
-	  echo "    Update Xcode from the App Store."; exit 1; \
-	fi; \
-	echo "  ✓ $$XB_LINE"
-	@# --- macOS SDK available ---
-	@if ! xcodebuild -showsdks 2>/dev/null | grep -qi macosx; then \
-	  echo "  ✗ No macOS SDK is registered with this Xcode install."; \
-	  echo "    Open Xcode once, agree to the terms, and let it install components."; \
-	  exit 1; \
-	fi; \
-	SDK=$$(xcodebuild -showsdks 2>/dev/null | grep -i macosx | tail -1 | awk '{print $$NF}'); \
-	echo "  ✓ macOS SDK: $$SDK"
-	@# --- project file present (catches "make from wrong directory") ---
-	@if [ ! -d "$(PROJECT)" ]; then \
-	  echo "  ✗ $(PROJECT) not found in $$(pwd)."; \
-	  echo "    Run make from the repo root."; exit 1; \
-	fi; \
-	echo "  ✓ project: $(PROJECT)"
-	@# --- icon helpers (optional; only required for `make icon`) ---
+	echo "  ✓ build.sh present"
 	@if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then \
 	  echo "  ✓ sips + iconutil (for 'make icon')"; \
 	else \
-	  echo "  ⚠ sips or iconutil missing — 'make icon' won't run, but 'make build' is fine."; \
+	  echo "  ⚠ sips or iconutil missing — 'make icon' won't run."; \
 	fi
 	@echo "→ Prerequisites OK."
 
 # ---------------------------------------------------------------------------
-# Build
+# Build (delegates to ./build.sh, which runs `swift build` + bundles the .app)
 # ---------------------------------------------------------------------------
 
 build: deps
-	xcodebuild \
-	  -project $(PROJECT) \
-	  -scheme $(SCHEME) \
-	  -configuration $(CONFIG) \
-	  -derivedDataPath $(DERIVED) \
-	  build
+	./build.sh $(CONFIG)
 
 release: deps
-	xcodebuild \
-	  -project $(PROJECT) \
-	  -scheme $(SCHEME) \
-	  -configuration Release \
-	  -derivedDataPath $(DERIVED) \
-	  build
+	./build.sh release
 
 # ---------------------------------------------------------------------------
 # Run / install / register
@@ -154,7 +96,56 @@ install: build
 	@echo "✓ copied to /Applications/mdv.app"
 	$(LSREGISTER) -f /Applications/mdv.app
 	@echo "✓ registered /Applications/mdv.app with LaunchServices"
+	@$(MAKE) --no-print-directory install-cli
 	@echo "  → To set as default for .md files: right-click any .md → Get Info → Open with → mdv → Change All."
+
+install-cli:
+	@if [ ! -x "$(CLI_SRC)" ]; then echo "✗ $(CLI_SRC) missing or not executable"; exit 1; fi
+	@SRC_ABS="$$(cd "$$(dirname $(CLI_SRC))" && pwd)/$$(basename $(CLI_SRC))"; \
+	$(MAKE) --no-print-directory _sudo CMD="mkdir -p '$$(dirname $(CLI_DST))'" \
+	   ASKPASS_PROMPT="Create $$(dirname $(CLI_DST))" >/dev/null; \
+	$(MAKE) --no-print-directory _sudo CMD="ln -sf '$$SRC_ABS' '$(CLI_DST)'" \
+	   ASKPASS_PROMPT="Symlink mdv CLI into $(CLI_DST)" \
+	&& echo "✓ linked $(CLI_DST) → $$SRC_ABS" \
+	|| { echo "✗ failed to symlink $(CLI_DST). Run manually:"; \
+	     echo "    sudo ln -sf $$SRC_ABS $(CLI_DST)"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Internal helper: run $(CMD) with sudo, falling back to a GUI password
+# prompt (osascript) when there's no terminal. Lets `make install` work from
+# editors / Claude Code / IDE shells that lack a TTY.
+#
+# Args:
+#   CMD             — shell command to run (required)
+#   ASKPASS_PROMPT  — text shown in the GUI dialog (optional)
+# ---------------------------------------------------------------------------
+_sudo:
+	@if [ -z "$(CMD)" ]; then echo "✗ _sudo: CMD is required"; exit 1; fi
+	@if eval "$(CMD)" 2>/dev/null; then exit 0; fi; \
+	PROMPT="$${ASKPASS_PROMPT:-Run a privileged command for mdv}"; \
+	if [ -t 0 ]; then \
+	  sudo sh -c "$(CMD)"; \
+	else \
+	  ASKPASS=$$(mktemp -t mdv-askpass.XXXXXX); \
+	  trap 'rm -f "$$ASKPASS"' EXIT; \
+	  printf '#!/bin/sh\nosascript -e '\''display dialog "%s" with hidden answer default answer "" with title "mdv install"'\'' -e '\''text returned of result'\'' 2>/dev/null\n' "$$PROMPT" > "$$ASKPASS"; \
+	  chmod +x "$$ASKPASS"; \
+	  SUDO_ASKPASS="$$ASKPASS" sudo -A sh -c "$(CMD)"; \
+	fi
+
+uninstall:
+	@if [ -L "$(CLI_DST)" ] || [ -e "$(CLI_DST)" ]; then \
+	  rm -f "$(CLI_DST)" 2>/dev/null || sudo rm -f "$(CLI_DST)"; \
+	  echo "✓ removed $(CLI_DST)"; \
+	else \
+	  echo "  (no $(CLI_DST) to remove)"; \
+	fi
+	@if [ -d /Applications/mdv.app ]; then \
+	  rm -rf /Applications/mdv.app 2>/dev/null || sudo rm -rf /Applications/mdv.app; \
+	  echo "✓ removed /Applications/mdv.app"; \
+	else \
+	  echo "  (no /Applications/mdv.app to remove)"; \
+	fi
 
 register: build
 	$(LSREGISTER) -f "$(APP)"
@@ -165,12 +156,11 @@ register: build
 # ---------------------------------------------------------------------------
 
 clean:
-	rm -rf $(DERIVED) build_icon
-	@echo "✓ removed $(DERIVED)/ and build_icon/"
+	rm -rf build .build build_icon
+	@echo "✓ removed build/, .build/, and build_icon/"
 
 # ---------------------------------------------------------------------------
 # Icon (regenerate from MDV.png)
-# Only needed if MDV.png changes; the compiled .icns is committed.
 # ---------------------------------------------------------------------------
 
 icon: $(ICON_DST)

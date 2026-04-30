@@ -36,6 +36,19 @@ struct mdvApp: App {
                     NotificationCenter.default.post(name: .openFileInNewWindow, object: nil)
                 }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
+                Divider()
+                Menu("Edit") {
+                    Button("Edit Current File") {
+                        NotificationCenter.default.post(name: .openInExternalEditor, object: nil)
+                    }
+                    .keyboardShortcut("e", modifiers: .command)
+                    Button("Choose Editor…") {
+                        NotificationCenter.default.post(name: .chooseExternalEditor, object: nil)
+                    }
+                    Button("Forget Editor") {
+                        NotificationCenter.default.post(name: .forgetExternalEditor, object: nil)
+                    }
+                }
             }
             CommandGroup(after: .pasteboard) {
                 Divider()
@@ -111,4 +124,7 @@ extension Notification.Name {
     static let openBookmarkSlot = Notification.Name("openBookmarkSlot")
     static let setPlaceholder = Notification.Name("setPlaceholder")
     static let jumpToPlaceholder = Notification.Name("jumpToPlaceholder")
+    static let chooseExternalEditor = Notification.Name("chooseExternalEditor")
+    static let openInExternalEditor = Notification.Name("openInExternalEditor")
+    static let forgetExternalEditor = Notification.Name("forgetExternalEditor")
 }

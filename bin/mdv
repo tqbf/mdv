@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# mdv — open Markdown files in the mdv.app GUI.
+#
+# Usage:
+#   mdv                    Launch the app
+#   mdv FILE [FILE ...]    Open file(s) in the app
+#   mdv -                  Read markdown from stdin and open it
+#   mdv -h | --help        Show this help
+#   mdv --version          Print bundle version
+set -euo pipefail
+
+# --- locate mdv.app -----------------------------------------------------------
+# Search order:
+#   1) $MDV_APP env var (if set and points to a bundle)
+#   2) /Applications/mdv.app
+#   3) ~/Applications/mdv.app
+#   4) ../mdv.app relative to this script (dev layout: build/mdv.app)
+#   5) `mdfind` query as last resort
+find_app() {
+  if [ -n "${MDV_APP:-}" ] && [ -d "$MDV_APP" ]; then echo "$MDV_APP"; return; fi
+  for p in \
+    "/Applications/mdv.app" \
+    "$HOME/Applications/mdv.app" \
+    "$(cd "$(dirname "$0")/.." && pwd)/build/mdv.app" \
+    "$(cd "$(dirname "$0")/.." && pwd)/mdv.app"
+  do
+    [ -d "$p" ] && { echo "$p"; return; }
+  done
+  if command -v mdfind >/dev/null; then
+    local hit
+    hit="$(mdfind "kMDItemCFBundleIdentifier == 'com.mdv.app'" 2>/dev/null | head -1)"
+    [ -n "$hit" ] && { echo "$hit"; return; }
+  fi
+  return 1
+}
+
+APP="$(find_app)" || { echo "mdv: mdv.app not found (set MDV_APP or install to /Applications)" >&2; exit 1; }
+
+usage() {
+  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# --- arg handling -------------------------------------------------------------
+case "${1:-}" in
+  -h|--help)
+    usage; exit 0 ;;
+  --version)
+    /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+    exit 0 ;;
+esac
+
+if [ $# -eq 0 ]; then
+  open "$APP"
+  exit 0
+fi
+
+# Read stdin into a temp .md and open that
+if [ "$1" = "-" ] && [ $# -eq 1 ]; then
+  tmp="$(mktemp -t mdv-stdin).md"
+  cat - > "$tmp"
+  open -a "$APP" "$tmp"
+  exit 0
+fi
+
+# Resolve relative paths so LaunchServices opens what the user meant.
+files=()
+for f in "$@"; do
+  if [ -e "$f" ]; then
+    files+=("$(cd "$(dirname "$f")" && pwd)/$(basename "$f")")
+  else
+    echo "mdv: no such file: $f" >&2
+    exit 1
+  fi
+done
+open -a "$APP" "${files[@]}"

@@ -1,4 +1,5 @@
 import AppKit
+import CGrammars
 import Foundation
 import MarkdownUI
 import SwiftTreeSitter
