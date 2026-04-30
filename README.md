@@ -56,6 +56,9 @@ Type `make`.
 
 Then some boring packaging stuff, and also Claude figured out how to make the icon work. 
 
+*Note: this log is less authentic now since Josh & I fell into a hole of trying to (and succeeding at) building the best conceivable
+Markdown viewer. But those prompts alone did get us to a Markdown viewer that was better than anything on the app store.*
+
 ## What It Looks Like
 
 ![Mdv Screenshot](MDV-SCREEN.png)
