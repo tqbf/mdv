@@ -30,6 +30,16 @@ cp mdv/AppIcon.icns             "$APP/Contents/Resources/AppIcon.icns"
 cp mdv/Fonts/*.otf              "$APP/Contents/Resources/"
 cp mdv/Grammars/*-highlights.scm "$APP/Contents/Resources/"
 
+# Bundle the CLI helper so the app can install /usr/local/bin/mdv pointing
+# at this script — the in-app "Install Command Line Tool…" menu symlinks
+# to this path.
+cp bin/mdv                       "$APP/Contents/Resources/mdv"
+chmod +x                         "$APP/Contents/Resources/mdv"
+
+# Bundle the in-app help doc; HelpManager copies it out to a stable path
+# under ~/Library/Application Support/mdv on demand so bookmarks survive.
+cp mdv/Help.md                   "$APP/Contents/Resources/Help.md"
+
 echo "→ codesigning (adhoc)"
 codesign --force --sign - --entitlements mdv/mdv.entitlements "$APP"
 

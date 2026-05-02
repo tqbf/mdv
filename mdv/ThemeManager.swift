@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import MarkdownUI
 
@@ -751,20 +752,69 @@ extension MDVTheme {
 
 /// Owns the user's current theme choice. Backed by `@AppStorage` so the
 /// last-selected theme persists across launches without any explicit save.
+///
+/// `selectedID` is what the user picked, which may be the special
+/// `systemID` sentinel meaning "follow the macOS appearance"; `current`
+/// is always a concrete theme. When the user is on `systemID` we KVO
+/// `NSApp.effectiveAppearance` so a system Light↔Dark switch reflows the
+/// document immediately.
 final class ThemeManager: ObservableObject {
+    /// Sentinel selection meaning "follow the system appearance". Resolves
+    /// to High Contrast in light mode, Twilight in dark.
+    static let systemID = "system"
+
+    /// Display name for the synthetic System entry in the theme picker.
+    static let systemDisplayName = "System"
+
     @AppStorage("mdv_theme_id") private var storedID: String = MDVTheme.default.id
 
+    /// What the user picked — may be `systemID`. Use this for menu
+    /// checkmarks; use `current` for actual rendering.
+    @Published private(set) var selectedID: String = MDVTheme.default.id
     @Published var current: MDVTheme = .default
 
+    private var appearanceObservation: NSKeyValueObservation?
+
     init() {
-        // Pull initial value from @AppStorage. The property wrapper isn't
-        // observable for our @Published mirror, so we sync once at init and
-        // again on every set(_:).
-        self.current = MDVTheme.byID(storedID)
+        self.selectedID = storedID
+        self.current = Self.resolve(id: storedID)
+        // KVO on effectiveAppearance: the OS posts when the user toggles
+        // dark mode, when scheduled night-shift fires, or when the
+        // appearance is forced on a per-window basis. We only re-resolve
+        // when the user's selection is "system" — explicit picks are sticky.
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            guard let self else { return }
+            DispatchQueue.main.async { self.systemAppearanceChanged() }
+        }
     }
 
+    /// Pick a concrete theme. Use `setSelection(_:)` with `systemID` for
+    /// the follow-the-system option.
     func set(_ theme: MDVTheme) {
-        current = theme
-        storedID = theme.id
+        setSelection(theme.id)
+    }
+
+    func setSelection(_ id: String) {
+        selectedID = id
+        storedID = id
+        current = Self.resolve(id: id)
+    }
+
+    private func systemAppearanceChanged() {
+        guard selectedID == Self.systemID else { return }
+        let resolved = Self.resolve(id: Self.systemID)
+        if resolved.id != current.id { current = resolved }
+    }
+
+    private static func resolve(id: String) -> MDVTheme {
+        if id == systemID {
+            return systemIsDark() ? .twilight : .highContrast
+        }
+        return MDVTheme.byID(id)
+    }
+
+    private static func systemIsDark() -> Bool {
+        let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+        return match == .darkAqua
     }
 }

@@ -779,11 +779,21 @@ struct ContentView: View {
     /// active one. Selection persists via ThemeManager (@AppStorage).
     private var themeMenu: some View {
         Menu {
+            Button {
+                themes.setSelection(ThemeManager.systemID)
+            } label: {
+                if themes.selectedID == ThemeManager.systemID {
+                    Label(ThemeManager.systemDisplayName, systemImage: "checkmark")
+                } else {
+                    Text(ThemeManager.systemDisplayName)
+                }
+            }
+            Divider()
             ForEach(MDVTheme.all) { theme in
                 Button {
                     themes.set(theme)
                 } label: {
-                    if themes.current.id == theme.id {
+                    if themes.selectedID == theme.id {
                         Label(theme.name, systemImage: "checkmark")
                     } else {
                         Text(theme.name)
@@ -796,7 +806,14 @@ struct ContentView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("Theme: \(themes.current.name)")
+        .help(themeMenuHelpText)
+    }
+
+    private var themeMenuHelpText: String {
+        if themes.selectedID == ThemeManager.systemID {
+            return "Theme: System — \(themes.current.name)"
+        }
+        return "Theme: \(themes.current.name)"
     }
 
     // MARK: - External editor
@@ -2060,6 +2077,7 @@ struct ContentView: View {
         let view = ContentView(initialURL: url)
             .environmentObject(history)
             .environmentObject(bookmarks)
+            .environmentObject(themes)
             .frame(minWidth: 760, minHeight: 520)
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)

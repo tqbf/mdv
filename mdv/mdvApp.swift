@@ -27,6 +27,12 @@ struct mdvApp: App {
         .defaultSize(width: 1080, height: 720)
         .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
+            CommandGroup(after: .appInfo) {
+                Divider()
+                Button("Install Command Line Tool…") {
+                    CLIInstaller.install()
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open…") {
                     NotificationCenter.default.post(name: .openFile, object: nil)
@@ -70,6 +76,18 @@ struct mdvApp: App {
                     NotificationCenter.default.post(name: .navigateForward, object: nil)
                 }
                 .keyboardShortcut(.rightArrow, modifiers: .command)
+            }
+            CommandGroup(replacing: .help) {
+                Button("mdv Help") {
+                    if let url = HelpManager.openHelp() {
+                        NotificationCenter.default.post(name: .openURLInWindow, object: url)
+                        if let win = NSApp.keyWindow ?? NSApp.windows.first {
+                            win.makeKeyAndOrderFront(nil)
+                        }
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
+                }
+                .keyboardShortcut("?", modifiers: .command)
             }
             CommandMenu("Bookmarks") {
                 Button("Bookmark Current Spot") {
