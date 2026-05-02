@@ -27,6 +27,16 @@ struct ContentView: View {
     @State private var sidebarWidth: CGFloat = 240
     @State private var dragHandleHovered = false
 
+    /// Sidebar collapse state. Defaults to false (sidebar open) on first
+    /// launch; persists via @AppStorage so the user's choice survives
+    /// quits. Toggled via View → Hide Sidebar (⌃⌘S), the hover-revealed
+    /// chevron button on the drag handle, or the matching expand chevron
+    /// in the left edge gutter when collapsed.
+    @AppStorage("mdv_sidebar_collapsed") private var sidebarCollapsed: Bool = false
+    /// Tracks hover on the collapsed-state edge gutter so the expand
+    /// chevron only reveals when the mouse approaches the left edge.
+    @State private var edgeGutterHovered = false
+
     // TOC + Bookmarks (right inspector)
     @AppStorage("mdv_inspector_visible") private var inspectorVisible: Bool = false
     @State private var tocSelectedBlock: Int? = nil
@@ -291,10 +301,15 @@ struct ContentView: View {
     /// were stacked on top.
     private var layoutBody: some View {
         HStack(spacing: 0) {
-            sidebar
-                .frame(width: sidebarWidth)
+            if !sidebarCollapsed {
+                sidebar
+                    .frame(width: sidebarWidth)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
 
-            dragHandle
+                dragHandle
+            } else {
+                edgeGutter
+            }
 
             markdownView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -307,6 +322,7 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.22), value: inspectorVisible)
+        .animation(.easeOut(duration: 0.22), value: sidebarCollapsed)
         .navigationTitle(selectedEntry?.filename ?? "mdv")
         .toolbar { toolbarContent }
         .modifier(NotificationHandlers(
@@ -327,7 +343,8 @@ struct ContentView: View {
             },
             forgetExternalEditor: { editorAppPath = "" },
             navigateBack: goBack,
-            navigateForward: goForward
+            navigateForward: goForward,
+            toggleSidebar: toggleSidebar
         ))
         .onOpenURL { url in
             loadFile(url)
@@ -449,7 +466,7 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            paneTracker.sidebarRightEdge = sidebarWidth + 8 // include drag handle width
+            paneTracker.sidebarRightEdge = sidebarCollapsed ? 0 : (sidebarWidth + 8) // include drag handle width
             paneTracker.install()
             if let url = initialURL {
                 loadFile(url)
@@ -468,7 +485,9 @@ struct ContentView: View {
             paneTracker.uninstall()
         }
         .onChange(of: sidebarWidth) { newValue in
-            paneTracker.sidebarRightEdge = newValue + 8
+            if !sidebarCollapsed {
+                paneTracker.sidebarRightEdge = newValue + 8
+            }
         }
     }
 
@@ -1056,6 +1075,15 @@ struct ContentView: View {
                 .fill(dragHandleHovered ? themes.current.accent.opacity(0.5) : themes.current.divider)
                 .frame(width: dragHandleHovered ? 2 : 1)
                 .animation(.easeInOut(duration: 0.15), value: dragHandleHovered)
+
+            // Hover-revealed collapse affordance: a small chevron-left button
+            // that fades in only while the mouse is over the divider area.
+            // The Button consumes its own click before the surrounding
+            // DragGesture sees it, so drag-to-resize and click-to-collapse
+            // coexist on the same 8pt strip without a mode toggle.
+            collapseChevron(direction: .left, visible: dragHandleHovered) {
+                toggleSidebar()
+            }
         }
         .onHover { inside in
             dragHandleHovered = inside
@@ -1068,6 +1096,74 @@ struct ContentView: View {
                     sidebarWidth = min(max(newWidth, minSidebarWidth), maxSidebarWidth)
                 }
         )
+    }
+
+    /// Thin (6pt) hot zone painted on the left edge while the sidebar is
+    /// collapsed. The chevron-right expand button stays visible at all
+    /// times — when the sidebar is hidden there's no other cue that it
+    /// can be brought back, so discoverability beats minimalism here.
+    /// The 1pt accent-tinted stripe still only appears on hover so the
+    /// edge isn't always wearing a visible rule.
+    private var edgeGutter: some View {
+        ZStack {
+            Color.clear
+                .frame(width: 6)
+                .contentShape(Rectangle())
+            Rectangle()
+                .fill(edgeGutterHovered ? themes.current.accent.opacity(0.5) : Color.clear)
+                .frame(width: edgeGutterHovered ? 2 : 1)
+                .animation(.easeInOut(duration: 0.15), value: edgeGutterHovered)
+
+            collapseChevron(direction: .right, visible: true) {
+                toggleSidebar()
+            }
+        }
+        .onHover { inside in
+            edgeGutterHovered = inside
+        }
+    }
+
+    /// Shared chevron button used by both the expanded-state drag handle
+    /// (chevron points left → collapse) and the collapsed-state edge
+    /// gutter (chevron points right → expand). Fades in/out on hover via
+    /// `.opacity` so the surrounding strip doesn't reflow when the mouse
+    /// arrives or leaves. Sized small (16×22) and placed in the top
+    /// quarter of the strip — high enough to feel like an affordance, not
+    /// a button bar.
+    private enum ChevronDirection { case left, right }
+
+    private func collapseChevron(direction: ChevronDirection, visible: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: direction == .left ? "chevron.left" : "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(themes.current.text.opacity(0.55))
+                .frame(width: 16, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(themes.current.background.opacity(0.85))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                .stroke(themes.current.divider, lineWidth: 0.5)
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .opacity(visible ? 1 : 0)
+        .animation(.easeOut(duration: 0.18), value: visible)
+        .help(direction == .left ? "Hide Sidebar (⌃⌘S)" : "Show Sidebar (⌃⌘S)")
+        // Anchor near the top of the strip so the button is in a
+        // glanceable, predictable spot — not floating in dead center.
+        .frame(maxHeight: .infinity, alignment: .top)
+        .padding(.top, 14)
+        .allowsHitTesting(visible)
+    }
+
+    private func toggleSidebar() {
+        sidebarCollapsed.toggle()
+        // Pane tracker classifies clicks by x-coord against the right edge
+        // of the sidebar (drag handle included). Collapsed → 0 means every
+        // click routes to the viewer pane, so ⌘F lands in the in-doc find.
+        paneTracker.sidebarRightEdge = sidebarCollapsed ? 0 : (sidebarWidth + 8)
     }
 
     // MARK: - Markdown View
@@ -2738,9 +2834,11 @@ private struct NotificationHandlers: ViewModifier {
     let forgetExternalEditor: () -> Void
     let navigateBack: () -> Void
     let navigateForward: () -> Void
+    let toggleSidebar: () -> Void
 
     func body(content: Content) -> some View {
         content
+            .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in toggleSidebar() }
             .onReceive(NotificationCenter.default.publisher(for: .openFile)) { _ in openFile() }
             .onReceive(NotificationCenter.default.publisher(for: .openFileInNewWindow)) { _ in openFileInNewWindow() }
             .onReceive(NotificationCenter.default.publisher(for: .openURLInWindow)) { notif in

@@ -14,6 +14,12 @@ struct mdvApp: App {
     /// punctuation (Phosphor, Standard Erin) ignore the preference.
     @AppStorage("mdv_smart_typography") private var userSmartTypography: Bool = true
 
+    /// Mirror of the per-window collapse state, so the View menu can show
+    /// "Hide Sidebar" vs. "Show Sidebar" and the menu-bar toggle title
+    /// reflects reality. Single-window app, so a global @AppStorage matches
+    /// the ContentView's @AppStorage 1:1.
+    @AppStorage("mdv_sidebar_collapsed") private var sidebarCollapsed: Bool = false
+
     init() {
         // Register the bundled Alegreya weights into the process-local font
         // space before any view hierarchy resolves a custom font name. Done
@@ -92,6 +98,10 @@ struct mdvApp: App {
             // so the user understands why their preference isn't taking
             // effect — instead of silently ignoring it.
             CommandGroup(after: .toolbar) {
+                Button(sidebarCollapsed ? "Show Sidebar" : "Hide Sidebar") {
+                    NotificationCenter.default.post(name: .toggleSidebar, object: nil)
+                }
+                .keyboardShortcut("s", modifiers: [.command, .control])
                 Divider()
                 Toggle(
                     themes.current.smartTypographyAllowed
@@ -181,4 +191,5 @@ extension Notification.Name {
     static let forgetExternalEditor = Notification.Name("forgetExternalEditor")
     static let navigateBack = Notification.Name("navigateBack")
     static let navigateForward = Notification.Name("navigateForward")
+    static let toggleSidebar = Notification.Name("toggleSidebar")
 }
