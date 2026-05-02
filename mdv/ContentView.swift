@@ -55,6 +55,13 @@ struct ContentView: View {
     /// `smartTypographyAllowed` flag — see `smartTypographyEnabled`.
     @AppStorage("mdv_smart_typography") private var userSmartTypography: Bool = true
 
+    /// Whether `http(s)` images in markdown are fetched. Default off — a
+    /// markdown viewer probably shouldn't be talking to arbitrary remote
+    /// servers without consent (privacy + tracking-pixel hygiene). Toggle
+    /// via View → Load Remote Images, or by clicking any remote-image
+    /// placeholder in the rendered document.
+    @AppStorage("mdv_load_remote_images") private var loadRemoteImages: Bool = false
+
     /// Watches the currently-loaded file so external-editor saves push
     /// fresh content into the viewer automatically.
     @State private var fileWatcher = FileWatcher()
@@ -1972,7 +1979,10 @@ struct ContentView: View {
             Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
                 .markdownTheme(themes.current.markdownTheme)
                 .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
-                .markdownImageProvider(LocalImageProvider(baseURL: currentDocumentDirectory))
+                .markdownImageProvider(LocalImageProvider(
+                    baseURL: currentDocumentDirectory,
+                    loadRemoteImages: loadRemoteImages
+                ))
         }
     }
 
@@ -2953,6 +2963,12 @@ final class FileWatcher {
 /// "just work" the way they do on GitHub or any other viewer.
 struct LocalImageProvider: ImageProvider {
     let baseURL: URL?
+    /// Gate for `http(s)` images. When false, remote URLs render a clickable
+    /// "Remote image blocked" placeholder instead of triggering a network
+    /// fetch. Default off — viewers shouldn't reach out to arbitrary servers
+    /// without the user opting in (privacy + tracking-pixel hygiene, mirrors
+    /// Apple Mail's default behavior).
+    let loadRemoteImages: Bool
 
     func makeImage(url: URL?) -> some View {
         Group {
@@ -2971,9 +2987,14 @@ struct LocalImageProvider: ImageProvider {
             dataURIImage(resolved)
         } else if resolved.isFileURL {
             localFileImage(resolved)
+        } else if loadRemoteImages {
+            // Use our own fetcher so we control the failure path. MarkdownUI's
+            // `DefaultImageProvider` silently renders nothing on a 404 / DNS
+            // failure / non-image response, which leaves the user staring at
+            // an empty space wondering whether the toggle worked.
+            RemoteImageView(url: resolved)
         } else {
-            // Network or anything else — let MarkdownUI's default handle it.
-            DefaultImageProvider().makeImage(url: resolved)
+            blockedRemoteImagePlaceholder(for: resolved)
         }
     }
 
@@ -3048,6 +3069,184 @@ struct LocalImageProvider: ImageProvider {
         .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.08))
+        )
+    }
+
+    /// Inert stand-in for a remote image when remote fetching is off. Click
+    /// pops the View menu open with "Load Remote Images" pre-highlighted at
+    /// the cursor (`NSMenu.popUp(positioning:at:in:)`), which gives the user
+    /// a one-click path from "I see a blocked image" to the persistent
+    /// preference toggle.
+    private func blockedRemoteImagePlaceholder(for url: URL) -> some View {
+        Button(action: { Self.revealRemoteImagesMenuItem() }) {
+            HStack(spacing: 8) {
+                Image(systemName: "photo.on.rectangle.angled")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Remote image blocked")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(url.host ?? url.absoluteString)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                Text("Click to enable")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: 480, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.secondary.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.secondary.opacity(0.18), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Remote images are disabled. Click to open View → Load Remote Images.")
+    }
+
+    /// Pops the View menu open at the current mouse location, with the
+    /// "Load Remote Images" item positioned (and pre-highlighted) under the
+    /// cursor. Walks `NSApp.mainMenu` rather than holding a menu reference
+    /// because the menu is constructed by SwiftUI's `CommandGroup` and we
+    /// don't get a handle back from that API.
+    static func revealRemoteImagesMenuItem() {
+        guard let viewMenu = NSApp.mainMenu?.item(withTitle: "View")?.submenu else { return }
+        let target = viewMenu.items.first(where: {
+            $0.title.localizedCaseInsensitiveContains("remote image")
+        })
+        let location = NSEvent.mouseLocation
+        viewMenu.popUp(positioning: target, at: location, in: nil)
+    }
+}
+
+/// Async fetcher for `http(s)` images, used when the user has opted in via
+/// View → Load Remote Images. Replaces MarkdownUI's `DefaultImageProvider`
+/// because the default silently renders nothing on a 404, DNS failure, or
+/// non-image response — that's a confusing UX right after the user
+/// explicitly enabled remote loading. Three states: loading (small
+/// progress indicator on a placeholder), loaded (sized image), failed
+/// (error placeholder showing host + reason).
+///
+/// In-process cache is a single static `NSCache<NSString, NSImage>` keyed
+/// on the URL's absolute string. Cap is the `NSCache` default; macOS
+/// will purge under memory pressure. No persistent disk cache —
+/// URLSession's default cache layer covers HTTP-level reuse.
+struct RemoteImageView: View {
+    let url: URL
+
+    @State private var image: NSImage?
+    @State private var failure: String?
+
+    static private let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = 64
+        return c
+    }()
+
+    var body: some View {
+        Group {
+            if let image {
+                let size = image.size
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: size.width > 0 ? size.width : nil)
+            } else if let failure {
+                failurePlaceholder(reason: failure)
+            } else {
+                loadingPlaceholder
+            }
+        }
+        .task(id: url.absoluteString) {
+            await load()
+        }
+    }
+
+    private func load() async {
+        let key = url.absoluteString as NSString
+        if let cached = Self.cache.object(forKey: key) {
+            self.image = cached
+            return
+        }
+        // Reset state when the URL changes mid-life (.task rerun).
+        self.image = nil
+        self.failure = nil
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                self.failure = "HTTP \(http.statusCode)"
+                return
+            }
+            guard let img = NSImage(data: data), img.size.width > 0 else {
+                self.failure = "not an image"
+                return
+            }
+            Self.cache.setObject(img, forKey: key)
+            self.image = img
+        } catch is CancellationError {
+            // .task cancelled (URL changed / view recycled). Don't surface
+            // as a failure — caller will re-run with the new URL.
+            return
+        } catch {
+            self.failure = (error as NSError).localizedDescription
+        }
+    }
+
+    private var loadingPlaceholder: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(url.host ?? url.absoluteString)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 480, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.secondary.opacity(0.06))
+        )
+    }
+
+    private func failurePlaceholder(reason: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.orange.opacity(0.8))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Couldn't load remote image")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("\(url.host ?? url.absoluteString) — \(reason)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 480, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.orange.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.3), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
         )
     }
 }
