@@ -927,7 +927,13 @@ final class ThemeManager: ObservableObject {
         // dark mode, when scheduled night-shift fires, or when the
         // appearance is forced on a per-window basis. We only re-resolve
         // when the user's selection is "system" — explicit picks are sticky.
-        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+        //
+        // Use `NSApplication.shared` (non-optional, lazy-init) rather than
+        // the global `NSApp` IUO. `NSApp` can be nil at the moment SwiftUI
+        // materializes our @StateObject — on macOS 14 specifically we've
+        // seen the @StateObject closure fire before NSApp is bound, which
+        // crashes the force-unwrap with a Swift _assertionFailure trap.
+        appearanceObservation = NSApplication.shared.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
             guard let self else { return }
             DispatchQueue.main.async { self.systemAppearanceChanged() }
         }
@@ -959,7 +965,8 @@ final class ThemeManager: ObservableObject {
     }
 
     private static func systemIsDark() -> Bool {
-        let match = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
+        // NSApplication.shared (not NSApp) — see init() comment.
+        let match = NSApplication.shared.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua])
         return match == .darkAqua
     }
 }

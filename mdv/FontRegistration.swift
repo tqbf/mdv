@@ -37,29 +37,36 @@ enum FontRegistration {
                 NSLog("[mdv] register \(name): \(e)")
             }
         }
+
+        // Resolve the Dyslexia themes' body family while we're already in App.init
+        // on the main thread, AppKit is up, and the bundled OpenDyslexic has just
+        // been registered. Doing this here (instead of from a `static let` lazy
+        // initializer that fires on first MDVTheme access) was a stability fix:
+        // on macOS 14.4 the lazy-static-let path triggered a Swift runtime
+        // EXC_BREAKPOINT inside ThemeManager.init when MDVTheme.standardErin
+        // was constructed for the first time. Resolving up-front avoids that.
+        let families = NSFontManager.shared.availableFontFamilies
+        for candidate in ["Dyslexie", "Dyslexie LT", "Dyslexie Regular"] {
+            if families.contains(candidate) {
+                dyslexiaBodyFamily = candidate
+                return
+            }
+        }
+        // Fallback already in place from the property's default value.
     }
 
-    /// Family name to use for the Dyslexia themes' body text. Prefers Dyslexie
-    /// (Christian Boer's commercial face — weighted bottoms, broad European
-    /// adoption in education) when the user has it installed system-wide via
-    /// Font Book; falls back to the bundled OpenDyslexic which has effectively
-    /// the same measure and cap height. Resolved on first access — App.init
-    /// has already registered OpenDyslexic by the time any theme accesses
-    /// this, so the fallback is always available.
-    static let dyslexiaBodyFamily: String = {
-        let families = NSFontManager.shared.availableFontFamilies
-        // Common family-name strings the Dyslexie installer uses on macOS.
-        // Prefer the canonical family in priority order; users with the
-        // "Dyslexie LT" variant will hit the second match.
-        for candidate in ["Dyslexie", "Dyslexie LT", "Dyslexie Regular"] {
-            if families.contains(candidate) { return candidate }
-        }
-        return "OpenDyslexic"
-    }()
+    /// Family name to use for the Standard Erin themes' body text. Prefers
+    /// Dyslexie (Christian Boer's commercial face) when the user has it
+    /// installed system-wide via Font Book; falls back to bundled OpenDyslexic.
+    /// Both faces share the weighted-bottom design and have effectively the
+    /// same measure and cap height, so the rest of the theme works for either.
+    /// Set in `registerBundledFonts()` — App.init calls that before any
+    /// MDVTheme accesses this, so by the time the theme constructs the value
+    /// is final.
+    static private(set) var dyslexiaBodyFamily: String = "OpenDyslexic"
 
-    /// Whether the resolved Dyslexia family is the user's system-installed
-    /// Dyslexie rather than the bundled OpenDyslexic. Surfaced for the
-    /// theme-menu help-text so the user can tell which face is in play.
+    /// Whether the resolved family is the user's system-installed Dyslexie
+    /// rather than the bundled OpenDyslexic. Surfaced for menu help text.
     static var dyslexiaUsingDyslexie: Bool {
         dyslexiaBodyFamily != "OpenDyslexic"
     }
