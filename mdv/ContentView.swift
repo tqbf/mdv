@@ -2988,8 +2988,11 @@ struct LocalImageProvider: ImageProvider {
         } else if resolved.isFileURL {
             localFileImage(resolved)
         } else if loadRemoteImages {
-            // Network — let MarkdownUI's default handle the fetch.
-            DefaultImageProvider().makeImage(url: resolved)
+            // Use our own fetcher so we control the failure path. MarkdownUI's
+            // `DefaultImageProvider` silently renders nothing on a 404 / DNS
+            // failure / non-image response, which leaves the user staring at
+            // an empty space wondering whether the toggle worked.
+            RemoteImageView(url: resolved)
         } else {
             blockedRemoteImagePlaceholder(for: resolved)
         }
@@ -3123,6 +3126,128 @@ struct LocalImageProvider: ImageProvider {
         })
         let location = NSEvent.mouseLocation
         viewMenu.popUp(positioning: target, at: location, in: nil)
+    }
+}
+
+/// Async fetcher for `http(s)` images, used when the user has opted in via
+/// View → Load Remote Images. Replaces MarkdownUI's `DefaultImageProvider`
+/// because the default silently renders nothing on a 404, DNS failure, or
+/// non-image response — that's a confusing UX right after the user
+/// explicitly enabled remote loading. Three states: loading (small
+/// progress indicator on a placeholder), loaded (sized image), failed
+/// (error placeholder showing host + reason).
+///
+/// In-process cache is a single static `NSCache<NSString, NSImage>` keyed
+/// on the URL's absolute string. Cap is the `NSCache` default; macOS
+/// will purge under memory pressure. No persistent disk cache —
+/// URLSession's default cache layer covers HTTP-level reuse.
+struct RemoteImageView: View {
+    let url: URL
+
+    @State private var image: NSImage?
+    @State private var failure: String?
+
+    static private let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = 64
+        return c
+    }()
+
+    var body: some View {
+        Group {
+            if let image {
+                let size = image.size
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: size.width > 0 ? size.width : nil)
+            } else if let failure {
+                failurePlaceholder(reason: failure)
+            } else {
+                loadingPlaceholder
+            }
+        }
+        .task(id: url.absoluteString) {
+            await load()
+        }
+    }
+
+    private func load() async {
+        let key = url.absoluteString as NSString
+        if let cached = Self.cache.object(forKey: key) {
+            self.image = cached
+            return
+        }
+        // Reset state when the URL changes mid-life (.task rerun).
+        self.image = nil
+        self.failure = nil
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                self.failure = "HTTP \(http.statusCode)"
+                return
+            }
+            guard let img = NSImage(data: data), img.size.width > 0 else {
+                self.failure = "not an image"
+                return
+            }
+            Self.cache.setObject(img, forKey: key)
+            self.image = img
+        } catch is CancellationError {
+            // .task cancelled (URL changed / view recycled). Don't surface
+            // as a failure — caller will re-run with the new URL.
+            return
+        } catch {
+            self.failure = (error as NSError).localizedDescription
+        }
+    }
+
+    private var loadingPlaceholder: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(url.host ?? url.absoluteString)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 480, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.secondary.opacity(0.06))
+        )
+    }
+
+    private func failurePlaceholder(reason: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(.orange.opacity(0.8))
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Couldn't load remote image")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("\(url.host ?? url.absoluteString) — \(reason)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 480, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.orange.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.3), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+        )
     }
 }
 
