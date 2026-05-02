@@ -55,6 +55,13 @@ struct ContentView: View {
     /// `smartTypographyAllowed` flag — see `smartTypographyEnabled`.
     @AppStorage("mdv_smart_typography") private var userSmartTypography: Bool = true
 
+    /// Whether `http(s)` images in markdown are fetched. Default off — a
+    /// markdown viewer probably shouldn't be talking to arbitrary remote
+    /// servers without consent (privacy + tracking-pixel hygiene). Toggle
+    /// via View → Load Remote Images, or by clicking any remote-image
+    /// placeholder in the rendered document.
+    @AppStorage("mdv_load_remote_images") private var loadRemoteImages: Bool = false
+
     /// Watches the currently-loaded file so external-editor saves push
     /// fresh content into the viewer automatically.
     @State private var fileWatcher = FileWatcher()
@@ -1972,7 +1979,10 @@ struct ContentView: View {
             Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
                 .markdownTheme(themes.current.markdownTheme)
                 .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
-                .markdownImageProvider(LocalImageProvider(baseURL: currentDocumentDirectory))
+                .markdownImageProvider(LocalImageProvider(
+                    baseURL: currentDocumentDirectory,
+                    loadRemoteImages: loadRemoteImages
+                ))
         }
     }
 
@@ -2953,6 +2963,12 @@ final class FileWatcher {
 /// "just work" the way they do on GitHub or any other viewer.
 struct LocalImageProvider: ImageProvider {
     let baseURL: URL?
+    /// Gate for `http(s)` images. When false, remote URLs render a clickable
+    /// "Remote image blocked" placeholder instead of triggering a network
+    /// fetch. Default off — viewers shouldn't reach out to arbitrary servers
+    /// without the user opting in (privacy + tracking-pixel hygiene, mirrors
+    /// Apple Mail's default behavior).
+    let loadRemoteImages: Bool
 
     func makeImage(url: URL?) -> some View {
         Group {
@@ -2971,9 +2987,11 @@ struct LocalImageProvider: ImageProvider {
             dataURIImage(resolved)
         } else if resolved.isFileURL {
             localFileImage(resolved)
-        } else {
-            // Network or anything else — let MarkdownUI's default handle it.
+        } else if loadRemoteImages {
+            // Network — let MarkdownUI's default handle the fetch.
             DefaultImageProvider().makeImage(url: resolved)
+        } else {
+            blockedRemoteImagePlaceholder(for: resolved)
         }
     }
 
@@ -3049,6 +3067,62 @@ struct LocalImageProvider: ImageProvider {
         .background(
             RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.08))
         )
+    }
+
+    /// Inert stand-in for a remote image when remote fetching is off. Click
+    /// pops the View menu open with "Load Remote Images" pre-highlighted at
+    /// the cursor (`NSMenu.popUp(positioning:at:in:)`), which gives the user
+    /// a one-click path from "I see a blocked image" to the persistent
+    /// preference toggle.
+    private func blockedRemoteImagePlaceholder(for url: URL) -> some View {
+        Button(action: { Self.revealRemoteImagesMenuItem() }) {
+            HStack(spacing: 8) {
+                Image(systemName: "photo.on.rectangle.angled")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Remote image blocked")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(url.host ?? url.absoluteString)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                Text("Click to enable")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: 480, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.secondary.opacity(0.08))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.secondary.opacity(0.18), style: StrokeStyle(lineWidth: 0.5, dash: [3, 3]))
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Remote images are disabled. Click to open View → Load Remote Images.")
+    }
+
+    /// Pops the View menu open at the current mouse location, with the
+    /// "Load Remote Images" item positioned (and pre-highlighted) under the
+    /// cursor. Walks `NSApp.mainMenu` rather than holding a menu reference
+    /// because the menu is constructed by SwiftUI's `CommandGroup` and we
+    /// don't get a handle back from that API.
+    static func revealRemoteImagesMenuItem() {
+        guard let viewMenu = NSApp.mainMenu?.item(withTitle: "View")?.submenu else { return }
+        let target = viewMenu.items.first(where: {
+            $0.title.localizedCaseInsensitiveContains("remote image")
+        })
+        let location = NSEvent.mouseLocation
+        viewMenu.popUp(positioning: target, at: location, in: nil)
     }
 }
 
