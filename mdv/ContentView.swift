@@ -40,6 +40,11 @@ struct ContentView: View {
     // External editor (Edit button in toolbar)
     @AppStorage("mdv_editor_app_path") private var editorAppPath: String = ""
 
+    /// User preference for SmartyPants-style typography. Default on. The
+    /// effective state is gated by the current theme's
+    /// `smartTypographyAllowed` flag — see `smartTypographyEnabled`.
+    @AppStorage("mdv_smart_typography") private var userSmartTypography: Bool = true
+
     /// Watches the currently-loaded file so external-editor saves push
     /// fresh content into the viewer automatically.
     @State private var fileWatcher = FileWatcher()
@@ -1860,14 +1865,26 @@ struct ContentView: View {
     @ViewBuilder
     private func blockView(block: String, idx: Int) -> some View {
         if shouldInlineHighlight(block: block, idx: idx) {
+            // Find-highlight path: render straight punctuation. Smartening
+            // here would shift character offsets and misalign the yellow
+            // highlight ranges (which were computed against rawMarkdown).
+            // The mismatch only surfaces while find is active in matched
+            // blocks; everything else still gets smart typography.
             Text(highlightedAttributedString(for: block, idx: idx))
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            Markdown(block)
+            Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
                 .markdownTheme(themes.current.markdownTheme)
                 .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
                 .markdownImageProvider(LocalImageProvider(baseURL: currentDocumentDirectory))
         }
+    }
+
+    /// Whether to apply SmartyPants-style typography on the next render.
+    /// Honors both the user's preference and the active theme's opt-out
+    /// (Phosphor and Standard Erin Light/Dark force this off).
+    private var smartTypographyEnabled: Bool {
+        userSmartTypography && themes.current.smartTypographyAllowed
     }
 
     /// Directory the currently-loaded markdown file lives in. Relative

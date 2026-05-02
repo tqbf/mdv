@@ -55,6 +55,19 @@ struct MDVTheme: Identifiable, Hashable {
     /// utility/technical themes go wider (Charcoal → 920).
     var articleMaxWidth: CGFloat? = 860
 
+    /// Whether SmartyPants-style typography (curly quotes, em/en-dashes,
+    /// ellipsis) is appropriate for this theme. The user-facing toggle is
+    /// AND-ed with this flag — themes that opt out always render straight
+    /// punctuation, regardless of preference. Default `true`. Themes
+    /// where smart punctuation actively works against the aesthetic or
+    /// the audience override to `false`:
+    /// - Phosphor: amber-on-black CRT homage. Smart quotes break the
+    ///   typewriter / terminal vibe.
+    /// - Standard Erin Light/Dark: dyslexia-friendly themes. Curly
+    ///   quotes and em-dashes are extra glyph variants to disambiguate;
+    ///   we keep punctuation literal and unambiguous.
+    var smartTypographyAllowed: Bool = true
+
     // MARK: Heading scale
 
     /// Heading sizes in em units (relative to body). The MarkdownUI gitHub
@@ -808,6 +821,7 @@ extension MDVTheme {
         blockquoteBar: Color(rgba: 0xFFA500FF),
         sidebarTint: Color(rgba: 0x000000FF),
         sidebarTintOpacity: 0.30,
+        smartTypographyAllowed: false,    // CRT terminals printed straight quotes — curling them breaks the era cue
         accent: Color(rgba: 0xFFA500FF),  // amber — leans into the CRT vibe
         codePalette: .phosphorPalette     // monochrome amber, brightness-only differentiation. No green or red.
     )
@@ -875,6 +889,7 @@ extension MDVTheme {
         baseFontSize: 15,                             // one step under the 16pt default — OpenDyslexic's x-height is large enough that 15pt reads ≈16pt SF; pulls the page back from looking outsized
         // Other typography knobs intentionally left at cross-theme defaults.
         // The font is the theme.
+        smartTypographyAllowed: false,                // dyslexia-friendly: keep punctuation in unambiguous straight forms
         headingFontWeight: .regular,                  // see doc-comment above — OpenDyslexic only ships 400 + 800
         strongFontWeight: .bold,                      // explicit so **emphasis** picks up the 800 variant
         accent: Color(rgba: 0xB0623EFF),              // terracotta
@@ -905,6 +920,7 @@ extension MDVTheme {
         sidebarTintOpacity: 0.32,
         bodyFontFamily: .custom(FontRegistration.dyslexiaBodyFamily),
         baseFontSize: 15,
+        smartTypographyAllowed: false,                // matches light variant — see TYPOGRAPHY.md
         headingFontWeight: .regular,
         strongFontWeight: .bold,
         accent: Color(rgba: 0xC99A4AFF),
