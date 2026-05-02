@@ -102,6 +102,21 @@ struct ContentView: View {
     /// new document's blocks are computed. We can't resolve the fingerprint
     /// against the document until rawMarkdown updates.
     @State private var pendingPostLoadAnchor: (blockIndex: Int, fingerprint: String)? = nil
+    /// Mirror of `selectedEntry` updated *after* `loadCurrentEntry` runs, so
+    /// we always know which file is currently in `rawMarkdown` independently
+    /// of `selectedEntry` (which flips synchronously when a sidebar click /
+    /// link / bookmark jump fires, before `loadCurrentEntry` mutates
+    /// `rawMarkdown`). Used by the cross-doc onChange handler to identify
+    /// the file being left so we can persist its scroll position before
+    /// `rawMarkdown` flips to the new file.
+    @State private var lastLoadedEntry: HistoryEntry? = nil
+    /// Set by `loadCurrentEntry` immediately before it mutates `rawMarkdown`.
+    /// The `.onChange(of: rawMarkdown)` handler consumes this to decide
+    /// whether to restore a saved scroll position. Gating on this flag means
+    /// FileWatcher-driven reloads (the user is reading and the file gets
+    /// rewritten by an external editor) do NOT snap the viewport back —
+    /// FileWatcher mutates rawMarkdown directly, bypassing `loadCurrentEntry`.
+    @State private var pendingScrollRestore: Bool = false
 
     /// In-memory placeholder slot (⌘0). Holds "the spot I want to flip back to."
     /// Not persisted — pure per-window navigation state, like Vim's last-jump
@@ -316,6 +331,16 @@ struct ContentView: View {
             handleDrop(providers)
         }
         .onChange(of: selectedEntry) { _ in
+            // Persist the leaving file's scroll position FIRST, before we touch
+            // `rawMarkdown` via `loadCurrentEntry`. We deliberately use
+            // `lastLoadedEntry` (mirror updated *after* loadCurrentEntry on
+            // prior ticks) instead of `previousSelectedEntry` (which is
+            // managed by the back-stack handler on `body` and whose
+            // observation order vs. this handler isn't guaranteed). At this
+            // point `rawMarkdown` and `blocks` still reflect that file.
+            if let leaving = lastLoadedEntry, leaving.path != selectedEntry?.path {
+                persistScrollPosition(for: leaving)
+            }
             // Selection changed by something other than a bookmark/placeholder
             // jump? Then drop the "active bookmark" highlight.
             if !bookmarkNavInProgress {
@@ -324,15 +349,31 @@ struct ContentView: View {
             }
             bookmarkNavInProgress = false
             loadCurrentEntry()
+            lastLoadedEntry = selectedEntry
         }
         .onChange(of: rawMarkdown) { _ in
             if isSearching { recomputeMatches() }
-            // Visible-block tracking is per-document; reset so the topmost-visible
-            // calculation doesn't use indices from the previous file before its
-            // blocks finish disappearing.
-            visibleBlocks.removeAll()
-            // If we got here via jumpTo() with a pending anchor, resolve it now
-            // that the new document's blocks exist.
+            // Visible-block tracking carries indices from the leaving doc.
+            // We can't just `removeAll()`: SwiftUI's `ForEach(id: \.offset)`
+            // keeps blocks with the same offset mounted across a doc swap,
+            // so their `.onAppear` does NOT refire on the new doc — wiping
+            // the set leaves it permanently empty for indices that share
+            // identity with the old doc, and `topVisibleBlock` collapses
+            // to 0 even when the user is reading mid-document. Instead,
+            // drop only the indices that don't exist in the new doc; the
+            // surviving entries correctly reflect blocks still on screen
+            // (because their views were never unmounted), and SwiftUI's
+            // `.onAppear` / `.onDisappear` will manage the rest as the
+            // user scrolls.
+            visibleBlocks = visibleBlocks.filter { $0 < blocks.count }
+            // Anchor precedence on a new document load:
+            //   1. bookmark / placeholder jump (pendingPostLoadAnchor)
+            //   2. fragment link click (pendingFragment)
+            //   3. saved scroll position from a previous visit
+            // Bookmarks set pendingAnchorBlock; fragments scroll asynchronously
+            // via tocScrollTrigger. Either claims the spot — only restore the
+            // saved scroll position if neither did.
+            var anchorClaimed = false
             if let anchor = pendingPostLoadAnchor {
                 let resolved = resolveBookmarkAnchor(
                     blocks: blocks,
@@ -341,12 +382,58 @@ struct ContentView: View {
                 )
                 pendingPostLoadAnchor = nil
                 pendingAnchorBlock = resolved
+                anchorClaimed = true
             }
             // Cross-document fragment scroll, deferred until headings exist.
             if let frag = pendingFragment {
                 pendingFragment = nil
                 // One runloop tick so tocHeadings is up-to-date for the new content.
                 DispatchQueue.main.async { scrollToFragment(frag) }
+                anchorClaimed = true
+            }
+            // Restore the scroll position on every fresh-from-disk load
+            // (`pendingScrollRestore` is set by `loadCurrentEntry`).
+            // FileWatcher reloads mutate rawMarkdown directly without
+            // setting the flag, so external edits don't yank the viewport
+            // back to where the user last left off.
+            //
+            // Always end up setting `pendingAnchorBlock` to *something*,
+            // even on a never-visited file or an invalidated anchor —
+            // ScrollView retains its offset across doc swaps, so leaving
+            // `pendingAnchorBlock` nil leaves the user wherever the
+            // previous doc was scrolled to. Defaulting to 0 (top of doc)
+            // makes the landing deterministic.
+            let shouldRestoreScroll = pendingScrollRestore && !anchorClaimed
+            pendingScrollRestore = false
+            if shouldRestoreScroll, let entry = selectedEntry {
+                var landingBlock = 0
+                if let saved = Database.shared.loadScrollPosition(path: entry.path),
+                   saved.blockIndex > 0 {
+                    // Two safety nets before honoring the saved anchor:
+                    //   1. mtime — markdown files change behind our back
+                    //      (user edits in another app, git checkout,
+                    //      etc.). If the file's mtime differs from what
+                    //      we recorded, treat the anchor as stale and
+                    //      fall back to the top rather than dropping the
+                    //      user into possibly-shifted content. The
+                    //      fingerprint handles *small* edits; mtime is
+                    //      the bigger hammer.
+                    //   2. bounds — if the recorded index is past the
+                    //      end of the (now shorter) document, fall back
+                    //      to the top explicitly rather than silently
+                    //      clamping to the last block.
+                    let currentMtime = (try? FileManager.default.attributesOfItem(atPath: entry.path)[.modificationDate] as? Date)??.timeIntervalSince1970
+                    let mtimeMatches = currentMtime.map { abs($0 - saved.fileMtime) < 1.0 } ?? false
+                    let inBounds = saved.blockIndex < blocks.count
+                    if mtimeMatches && inBounds {
+                        landingBlock = resolveBookmarkAnchor(
+                            blocks: blocks,
+                            storedIndex: saved.blockIndex,
+                            fingerprint: saved.blockFingerprint
+                        )
+                    }
+                }
+                pendingAnchorBlock = landingBlock
             }
         }
         .onChange(of: isSearching) { active in
@@ -364,9 +451,15 @@ struct ContentView: View {
             } else if let last = history.entries.first {
                 selectedEntry = last
                 loadCurrentEntry()
+                lastLoadedEntry = last
             }
         }
         .onDisappear {
+            // Window close / app quit: persist the current file's scroll
+            // position so the next launch lands on the same spot.
+            if let entry = selectedEntry {
+                persistScrollPosition(for: entry)
+            }
             paneTracker.uninstall()
         }
         .onChange(of: sidebarWidth) { newValue in
@@ -2415,6 +2508,12 @@ struct ContentView: View {
             return
         }
         let url = URL(fileURLWithPath: entry.path)
+        // Mark the upcoming `rawMarkdown` change as a fresh load so the
+        // rawMarkdown onChange handler will restore the saved scroll
+        // anchor for this file (if any). FileWatcher takes a different
+        // path that doesn't set this flag — its reloads should leave
+        // the viewport where it is.
+        pendingScrollRestore = true
         if let content = try? String(contentsOf: url, encoding: .utf8) {
             rawMarkdown = content
         } else {
@@ -2432,6 +2531,40 @@ struct ContentView: View {
                 self.rawMarkdown = fresh
             }
         }
+    }
+
+    /// Persist the current scroll anchor for `entry`. Reads `topVisibleBlock`
+    /// directly (== `visibleBlocks.min()`) rather than the `currentTopBlock`
+    /// mirror, because the back-stack handler on `body` resets
+    /// `currentTopBlock = 0` in its defer block, and SwiftUI's invocation
+    /// order across multiple onChange handlers for the same key isn't
+    /// guaranteed — empirically that defer can fire before this save runs.
+    /// `visibleBlocks` is safe to read here: it's only wiped by the
+    /// `.onChange(of: rawMarkdown)` handler, which fires on the *next*
+    /// runloop tick after `loadCurrentEntry` mutates `rawMarkdown`, well
+    /// after we've already saved.
+    ///
+    /// Caller must invoke this BEFORE any code path that mutates `rawMarkdown`
+    /// for a different file — otherwise `blocks` will already reflect the
+    /// new file and the fingerprint will be wrong.
+    private func persistScrollPosition(for entry: HistoryEntry) {
+        let docBlocks = blocks
+        let idx = topVisibleBlock
+        let fp = (idx >= 0 && idx < docBlocks.count)
+            ? bookmarkFingerprint(forBlock: docBlocks[idx])
+            : ""
+        // Stamp the file's current mtime alongside the anchor — on restore we
+        // compare to the file's mtime at load time and invalidate the anchor
+        // if the file has changed under us. The fingerprint already gives us
+        // resilience to *small* edits, but a wholesale rewrite could leave the
+        // user dropped into nonsense.
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: entry.path)[.modificationDate] as? Date)??.timeIntervalSince1970 ?? 0
+        Database.shared.saveScrollPosition(
+            path: entry.path,
+            blockIndex: idx,
+            fingerprint: fp,
+            fileMtime: mtime
+        )
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
