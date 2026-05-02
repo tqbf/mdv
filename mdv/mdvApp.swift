@@ -8,6 +8,12 @@ struct mdvApp: App {
     @StateObject private var themes = ThemeManager()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    /// User preference: SmartyPants-style typography on prose. Default on.
+    /// Effective state is `userSmartTypography && themes.current.smartTypographyAllowed`
+    /// — themes whose aesthetic or audience argues against curling
+    /// punctuation (Phosphor, Standard Erin) ignore the preference.
+    @AppStorage("mdv_smart_typography") private var userSmartTypography: Bool = true
+
     init() {
         // Register the bundled Alegreya weights into the process-local font
         // space before any view hierarchy resolves a custom font name. Done
@@ -76,6 +82,24 @@ struct mdvApp: App {
                     NotificationCenter.default.post(name: .navigateForward, object: nil)
                 }
                 .keyboardShortcut(.rightArrow, modifiers: .command)
+            }
+            // View menu addition: Smart Typography toggle. Sits in the
+            // SwiftUI-generated View menu (CommandGroup(after: .toolbar)).
+            // The toggle persists user intent; the *effective* state is
+            // ANDed with the current theme's `smartTypographyAllowed`
+            // flag. When the active theme blocks smart typography we
+            // disable the menu item and append "(off for this theme)"
+            // so the user understands why their preference isn't taking
+            // effect — instead of silently ignoring it.
+            CommandGroup(after: .toolbar) {
+                Divider()
+                Toggle(
+                    themes.current.smartTypographyAllowed
+                        ? "Smart Typography"
+                        : "Smart Typography (off for this theme)",
+                    isOn: $userSmartTypography
+                )
+                .disabled(!themes.current.smartTypographyAllowed)
             }
             CommandGroup(replacing: .help) {
                 Button("mdv Help") {
