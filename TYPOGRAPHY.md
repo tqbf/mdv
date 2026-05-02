@@ -69,6 +69,8 @@ Each theme should pick a tier explicitly and document the choice.
 | Solarized Dark | system sans | 16 | 0.30em | 1.75 / 1.4 / 1.15 | yes / no | 860pt | tier 2 (lifted) | Defaults + Solarized yellow accent. |
 | Phosphor | system sans | 16 | 0.30em | 1.75 / 1.4 / 1.15 | yes / no | 860pt | tier 1 (= body) | Defaults + amber accent (CRT vibe). |
 | Twilight | system sans | 16 | 0.30em | 1.75 / 1.4 / 1.15 | yes / no | 860pt | tier 2 (lifted) | Defaults + cream accent. |
+| Standard Erin Light | OpenDyslexic / Dyslexie | 15 | 0.30em | 1.75 / 1.4 / 1.15 | yes / no | 860pt | tier 1 (= body) | Defaults-everywhere typography. Heading weight = `.regular`, strong weight = `.bold` (font-specific). Cream bg, warm-dark text, terracotta accent. |
+| Standard Erin Dark | OpenDyslexic / Dyslexie | 15 | 0.30em | 1.75 / 1.4 / 1.15 | yes / no | 860pt | tier 1 (= body) | Same as light + dark palette: deep-navy bg, warm-cream text, dusty-amber accent. |
 
 ## Sevilla
 
@@ -154,3 +156,66 @@ These are not generalizable to other themes — they tune around Alegreya's spec
 - **`articleMaxWidth` 920 (wider than default 860).** Technical reading scans better wider than prose does. Sevilla goes the other direction (620, narrower).
 - **`paragraphLineSpacingEm` 0.25 (tighter than default 0.30).** GitHub-doc density.
 - **Custom `accent` color.** The system `.accentColor` is a saturated blue that visually competes with the heading whites and bg darks. The muted `#2E7AEB` reads as a quieter affordance.
+
+## Standard Erin (Light & Dark)
+
+> Theme pair whose entire identity is the typeface — bundles **OpenDyslexic** (FOSS, Abbie Gonzalez, SIL OFL); falls back to the user's system-installed **Dyslexie** (Christian Boer) when present. Typography sits at the cross-theme defaults: standard measure, standard leading, standard heading scale, standard rhythm. The font is the point; everything else stays out of its way.
+
+### Typeface
+
+Four OpenDyslexic weights ship under `mdv/Fonts/` (Regular / Italic / Bold / Bold-Italic, ~865 KB), registered into the process-local font space at app launch — same mechanism Sevilla uses for Alegreya.
+
+`FontRegistration.dyslexiaBodyFamily` resolves to `"Dyslexie"` (or `"Dyslexie LT"` / `"Dyslexie Regular"`) when the user has it installed via Font Book, otherwise to `"OpenDyslexic"`. Resolution is at first-access (lazy `static let`) and is sticky for the session — registering OpenDyslexic happens first, so the fallback is always available. Both faces share the design feature these themes exist for: a heavier weight at the bottom of each glyph that visually anchors letters on the baseline and resists the perceived flipping of similar letterforms (b/d, p/q, n/u). They share roughly the same x-height, cap height, and metrics, which is why the rest of the theme works for both without per-face branching.
+
+### The weight problem (and how this theme handles it)
+
+OpenDyslexic ships only two upright weights: **Regular** (OS/2 usWeightClass 400) and **Bold** (usWeightClass **800** — declared as ExtraBold, not 700). Plus, the Regular itself is visually heavy by design — the weighted glyph bottoms are part of the typeface, not added by emphasis.
+
+Letting MarkdownUI's default `FontWeight(.semibold)` apply to headings under this family does the wrong thing twice over. AppKit's weight matcher resolves `.semibold` (600) by picking the closest registered weight; with only 400 and 800 in the family, **headings render as the 800 ExtraBold variant**. The result is body-text that already looks heavy + headings that are objectively *very* heavy — the whole document reads as a uniform wall of bold.
+
+`MDVTheme.headingFontWeight` (default `.semibold`) and `MDVTheme.strongFontWeight` (default `.semibold`) exist for exactly this problem. Standard Erin overrides:
+
+- `headingFontWeight = .regular` — headings render in OpenDyslexic-Regular at the heading size. Body and headings end up at the same weight; size + color + the H1 rule carry hierarchy.
+- `strongFontWeight = .bold` — `**bold**` runs explicitly request the heavy variant, so emphasis still picks up OpenDyslexic-Bold for the runs where it actually matters. (The default `.semibold` resolves to the same Bold variant in this family, but `.bold` makes the intent explicit and survives a future weight expansion.)
+
+This is the same pattern Sevilla applies in reverse: Sevilla's Alegreya is heavy enough at semibold that `strong` doesn't need to lift either — both themes recognize that an already-heavy face shouldn't be doubled-down on with weight modifiers.
+
+### Everything else
+
+The only other knob this theme moves is `baseFontSize: 15` (one step under the 16pt cross-theme default). OpenDyslexic's x-height runs slightly large for its em-box, so 15pt reads ≈16pt SF for x-height — bumping back to 16 leaves the page feeling outsized. Reading themes that bundle a face usually push body size up (Sevilla → 17 to match Alegreya); Standard Erin pushes the other direction.
+
+Everything else — `paragraphLineSpacingEm`, `articleMaxWidth`, `articleHorizontalPadding`, the heading scale, the rules, the per-element rhythm — is left at the `MDVTheme` cross-theme default. The earliest cut of this theme pushed line spacing to 1.7×, capped the measure at 60–66ch, and inflated block rhythm — generous BDA-style accessibility tuning that turned out to overreach: the page stopped feeling information-dense and started feeling like a printed accessibility pamphlet. Reverted. The font alone is what makes the theme work for this audience; piling on additional accessibility knobs got in the way of normal reading.
+
+### Palette
+
+The palette is a deliberate identity choice — same warm cream / deep navy direction as before, but at standard density:
+
+- **Light:** cream `#FBF7E8` background, warm-dark `#2C2A26` body, deep blue `#1B4F8A` link, terracotta `#B0623E` accent. Pure values (#FFF / #000) deliberately avoided — that's the one accessibility cue that's free of typography cost.
+- **Dark:** deep-navy `#1B2233` background, warm-cream `#E5DCC5` body, warm-amber `#F5C97A` link, dusty-amber `#C99A4A` accent. Same "stay out of pure-value territory" rule.
+
+### Code highlighting
+
+Both themes ship a restrained `CodePalette` (`dyslexiaLightPalette` / `dyslexiaDarkPalette`). High-contrast rainbow palettes (GitHub Dark, One Dark) pull the eye around the code block; the palette stays in a low-saturation warm band that keeps the page calm. **No reds, no greens** in the dark palette — both are common confusion pairs in dyslexia + colorblindness comorbidities — only warm-cream / dusty-amber tokens with one cool dusty-blue accent for function names so they don't drift into body color.
+
+### Why pure black on pure white is the wrong default for this audience
+
+The bookworm intuition — pure white background, pure black text, edges as crisp as possible — is the wrong call for many dyslexic readers. High-contrast pairs (#000 / #FFF) are linked to **visual stress**: glare, character flicker / "swimming text", and increased fatigue during sustained reading. Both themes deliberately avoid those endpoints:
+
+- **Light theme background `#FBF7E8`** (warm cream): the most-recommended low-stress reading surface. Pastel yellow / peach / cream / blue / green are all defensible options; cream is the most neutral.
+- **Light theme body `#2C2A26`** (warm dark, not pure black): same hue family as the bg so paragraphs don't flicker against the cream.
+- **Dark theme background `#1B2233`** (deep navy, not pure black): pure black + cream text reintroduces the same edge-glare problem the light theme avoids; navy softens the ground.
+- **Dark theme body `#E5DCC5`** (warm cream, not pure white): the matching warm cream as foreground keeps the palette in a single hue family rather than smacking the reader with cool-white text on cool-dark ground.
+
+### Code highlighting
+
+Both themes ship a restrained `CodePalette` (`dyslexiaLightPalette` / `dyslexiaDarkPalette`). High-contrast rainbow palettes (GitHub Dark, One Dark) pull the eye around the code block — that works against the calm reading surface the rest of the theme is engineered for. The palettes:
+
+- **Light** — body-color plain text, muted plum keywords, forest-teal strings, umber numbers, deep-blue functions (matches the link), terracotta attributes (matches the accent). Tertiary-color italic comments. No saturated reds; no pure greens.
+- **Dark** — cream plain text, dusty-amber keywords, wheat strings, soft cream-amber numbers, dusty pale-blue functions (the only cool note in an otherwise warm palette, by design — function calls need to read as something other than body). Tertiary-color italic comments. **No greens, no reds** — both are common confusion pairs in dyslexia + colorblindness comorbidities; the palette stays in a warm-cream / dusty-amber band.
+
+### What we explicitly did NOT do
+
+- **Override emphasis (`*em*`) to render upright.** Italics are widely flagged as harder for dyslexic readers, but stripping them silently changes the author's intent. The bundled OpenDyslexic-Italic and Dyslexie-Italic both retain the weighted-bottom design and read better than italic Helvetica, so we keep the rendering authentic to what the author wrote.
+- **Force underlined links.** MarkdownUI's inline-link styling doesn't have a clean per-theme underline knob, and underline-by-default on every inline link adds visual clutter. Color delta carries link affordance; users who want underlines have to author them.
+- **Increase letter-tracking.** Dyslexic-readability research suggests slightly increased letter spacing helps. MarkdownUI doesn't expose tracking via the theme API, so the bundled face's native metrics carry. OpenDyslexic and Dyslexie both ship with already-generous letter spacing for this exact reason — tracking the rendered text on top would risk blowing through the measure.
+- **Justify or center body text.** Left-rag is mandatory for this audience; the cross-theme rules already prohibit justification.

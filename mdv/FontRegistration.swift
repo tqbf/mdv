@@ -1,14 +1,15 @@
 import Foundation
+import AppKit
 import CoreText
 
 /// Bundled fonts registered into the process-local font space at app launch.
 /// We don't install fonts on the user's system — these live in
 /// `mdv.app/Contents/Resources/` and disappear when the app exits.
 enum FontRegistration {
-    /// PostScript file names (without extension) of the bundled Alegreya weights.
-    /// Six weights cover the full markdown spectrum (regular/italic body, semibold
-    /// emphasis, bold for strong/headings, extrabold for h1/h2). Black and the
-    /// rarer italic variants are skipped to keep the bundle around 1.7 MB.
+    /// PostScript file names (without extension) of the bundled font weights.
+    /// Alegreya: six weights for the Sevilla reading theme.
+    /// OpenDyslexic: four weights for the Dyslexia themes — the FOSS face
+    /// purpose-built for dyslexic readability (weighted glyph bottoms).
     private static let bundledFonts = [
         "Alegreya-Regular",
         "Alegreya-Italic",
@@ -16,6 +17,10 @@ enum FontRegistration {
         "Alegreya-Bold",
         "Alegreya-BoldItalic",
         "Alegreya-ExtraBold",
+        "OpenDyslexic-Regular",
+        "OpenDyslexic-Italic",
+        "OpenDyslexic-Bold",
+        "OpenDyslexic-Bold-Italic",
     ]
 
     static func registerBundledFonts() {
@@ -32,5 +37,30 @@ enum FontRegistration {
                 NSLog("[mdv] register \(name): \(e)")
             }
         }
+    }
+
+    /// Family name to use for the Dyslexia themes' body text. Prefers Dyslexie
+    /// (Christian Boer's commercial face — weighted bottoms, broad European
+    /// adoption in education) when the user has it installed system-wide via
+    /// Font Book; falls back to the bundled OpenDyslexic which has effectively
+    /// the same measure and cap height. Resolved on first access — App.init
+    /// has already registered OpenDyslexic by the time any theme accesses
+    /// this, so the fallback is always available.
+    static let dyslexiaBodyFamily: String = {
+        let families = NSFontManager.shared.availableFontFamilies
+        // Common family-name strings the Dyslexie installer uses on macOS.
+        // Prefer the canonical family in priority order; users with the
+        // "Dyslexie LT" variant will hit the second match.
+        for candidate in ["Dyslexie", "Dyslexie LT", "Dyslexie Regular"] {
+            if families.contains(candidate) { return candidate }
+        }
+        return "OpenDyslexic"
+    }()
+
+    /// Whether the resolved Dyslexia family is the user's system-installed
+    /// Dyslexie rather than the bundled OpenDyslexic. Surfaced for the
+    /// theme-menu help-text so the user can tell which face is in play.
+    static var dyslexiaUsingDyslexie: Bool {
+        dyslexiaBodyFamily != "OpenDyslexic"
     }
 }

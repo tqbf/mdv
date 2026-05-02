@@ -65,6 +65,19 @@ struct MDVTheme: Identifiable, Hashable {
     var h2SizeEm: CGFloat = 1.4
     var h3SizeEm: CGFloat = 1.15
 
+    /// Weight applied to h1–h6. Default `.semibold` matches MarkdownUI's
+    /// gitHub theme. Themes that bundle a heavy face whose Regular is
+    /// already visually weighty (OpenDyslexic, Dyslexie) drop this back to
+    /// `.regular` so headings differ from body by size + color + rule
+    /// instead of doubling-down on weight.
+    var headingFontWeight: Font.Weight = .semibold
+    /// Weight applied to in-paragraph `**strong**` runs. Default `.semibold`
+    /// matches MarkdownUI's gitHub. Themes whose body face only ships a
+    /// Regular and a heavy weight (OpenDyslexic: 400 + 800) can use `.bold`
+    /// here to force the bold variant; themes whose semibold reads cleanly
+    /// on its own can leave the default.
+    var strongFontWeight: Font.Weight = .semibold
+
     /// H1 keeps a (per-theme-divider-color) rule for orientation. H2 rules
     /// stack visually with the H1 rule and produce "designed document" mass;
     /// off by default. Themes that genuinely want a rule under every
@@ -304,6 +317,57 @@ extension CodePalette {
         diffRemoveBg: Color(rgba: 0x141414FF)
     )
 
+    /// Dyslexia Light — restrained palette tuned for the cream/dark-warm
+    /// reading themes. Token differentiation kept low-saturation: high-contrast
+    /// rainbow palettes pull the eye around the page, which works against the
+    /// "calm reading surface" the dyslexia themes optimize for.
+    static let dyslexiaLightPalette = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0x2C2A26FF),  // = body
+        keyword:      Color(rgba: 0x6A4A87FF),  // muted plum
+        string:       Color(rgba: 0x2A6A52FF),  // forest teal
+        number:       Color(rgba: 0x8A4A1FFF),  // umber
+        comment:      Color(rgba: 0x8B8576FF),  // = tertiaryText, italic in render
+        type:         Color(rgba: 0x5A5034FF),  // olive
+        function:     Color(rgba: 0x1B4F8AFF),  // = link (deep blue)
+        attribute:    Color(rgba: 0xB0623EFF),  // = accent (terracotta)
+        variable:     Color(rgba: 0x2C2A26FF),
+        constant:     Color(rgba: 0x8A4A1FFF),
+        operatorColor:Color(rgba: 0x2C2A26FF),
+        lineNumber:   Color(rgba: 0xC0B49AFF),
+        lineHighlight:Color(rgba: 0xF0E9CFFF),
+        diffAdd:      Color(rgba: 0x4F7138FF),
+        diffRemove:   Color(rgba: 0x8C2A1AFF),
+        diffAddBg:    Color(rgba: 0xE3E5C9FF),
+        diffRemoveBg: Color(rgba: 0xF0DCD0FF)
+    )
+
+    /// Dyslexia Dark — warm-amber-on-navy palette tuned to match the cream
+    /// body color. No greens, no reds — both are common confusion pairs;
+    /// the palette stays in a warm-cream / dusty-amber band with a single
+    /// muted-blue accent for functions so links/functions don't drift into
+    /// the body color.
+    static let dyslexiaDarkPalette = CodePalette(
+        background: nil,
+        plain:        Color(rgba: 0xE5DCC5FF),  // = body
+        keyword:      Color(rgba: 0xC99A4AFF),  // muted amber (= accent)
+        string:       Color(rgba: 0xD2BD8AFF),  // wheat — distinct from amber via lower saturation
+        number:       Color(rgba: 0xE8B270FF),  // soft cream-amber
+        comment:      Color(rgba: 0x847C6AFF),  // = tertiaryText, italic in render
+        type:         Color(rgba: 0xD2BD8AFF),
+        function:     Color(rgba: 0xA8C3E0FF),  // dusty pale blue — only cool note in the palette
+        attribute:    Color(rgba: 0xC9846AFF),  // warm peach
+        variable:     Color(rgba: 0xE5DCC5FF),
+        constant:     Color(rgba: 0xE8B270FF),
+        operatorColor:Color(rgba: 0xE5DCC5FF),
+        lineNumber:   Color(rgba: 0x52596CFF),
+        lineHighlight:Color(rgba: 0x252D40FF),
+        diffAdd:      Color(rgba: 0xC9C19AFF),  // brightness, not green
+        diffRemove:   Color(rgba: 0x847C6AFF),  // brightness, not red
+        diffAddBg:    Color(rgba: 0x222B1AFF),
+        diffRemoveBg: Color(rgba: 0x2A211AFF)
+    )
+
     /// Twilight — pastel palette matching the cool navy bg + mint heading
     /// + cream link. Low saturation throughout.
     static let twilightPalette = CodePalette(
@@ -359,6 +423,8 @@ extension MDVTheme {
         let h2Bottom = self.h2BottomSpacing
         let h3Top = self.h3TopSpacing
         let h3Bottom = self.h3BottomSpacing
+        let headWeight = self.headingFontWeight
+        let strongWeight = self.strongFontWeight
 
         return Theme()
             .text {
@@ -373,7 +439,7 @@ extension MDVTheme {
                 BackgroundColor(sbg)
             }
             .strong {
-                FontWeight(.semibold)
+                FontWeight(strongWeight)
                 ForegroundColor(strong)
             }
             .link {
@@ -386,7 +452,7 @@ extension MDVTheme {
                         .relativeLineSpacing(.em(0.125))
                         .markdownMargin(top: h1Top, bottom: h1Bottom)
                         .markdownTextStyle {
-                            FontWeight(.semibold)
+                            FontWeight(headWeight)
                             FontSize(.em(h1))
                             ForegroundColor(head)
                         }
@@ -400,7 +466,7 @@ extension MDVTheme {
                         .relativeLineSpacing(.em(0.125))
                         .markdownMargin(top: h2Top, bottom: h2Bottom)
                         .markdownTextStyle {
-                            FontWeight(.semibold)
+                            FontWeight(headWeight)
                             FontSize(.em(h2))
                             ForegroundColor(head)
                         }
@@ -412,7 +478,7 @@ extension MDVTheme {
                     .relativeLineSpacing(.em(0.125))
                     .markdownMargin(top: h3Top, bottom: h3Bottom)
                     .markdownTextStyle {
-                        FontWeight(.semibold)
+                        FontWeight(headWeight)
                         FontSize(.em(h3))
                         ForegroundColor(head)
                     }
@@ -422,7 +488,7 @@ extension MDVTheme {
                     .relativeLineSpacing(.em(0.125))
                     .markdownMargin(top: 24, bottom: 16)
                     .markdownTextStyle {
-                        FontWeight(.semibold)
+                        FontWeight(headWeight)
                         ForegroundColor(head)
                     }
             }
@@ -431,7 +497,7 @@ extension MDVTheme {
                     .relativeLineSpacing(.em(0.125))
                     .markdownMargin(top: 24, bottom: 16)
                     .markdownTextStyle {
-                        FontWeight(.semibold)
+                        FontWeight(headWeight)
                         FontSize(.em(0.875))
                         ForegroundColor(head)
                     }
@@ -441,7 +507,7 @@ extension MDVTheme {
                     .relativeLineSpacing(.em(0.125))
                     .markdownMargin(top: 24, bottom: 16)
                     .markdownTextStyle {
-                        FontWeight(.semibold)
+                        FontWeight(headWeight)
                         FontSize(.em(0.85))
                         ForegroundColor(ttxt)
                     }
@@ -731,6 +797,83 @@ extension MDVTheme {
         codePalette: .twilightPalette     // pastels: pink-cream keywords, soft mint strings, lilac attributes — matches the navy/mint/cream palette
     )
 
+    /// Light-mode theme whose core feature is the typeface: bundles
+    /// **OpenDyslexic** (FOSS, Abbie Gonzalez) and falls back to the user's
+    /// system-installed **Dyslexie** (Christian Boer) when present. Both
+    /// share the weighted-glyph-bottom design that anchors letters and
+    /// resists the perceived flipping of similar letterforms.
+    ///
+    /// Typography lives at the cross-theme defaults — same measure, leading,
+    /// heading scale, and rhythm as High Contrast or Solarized Light. The
+    /// font is the entire point; everything else stays out of its way.
+    ///
+    /// **Two weight overrides are required for OpenDyslexic.** Its Regular is
+    /// already heavy by design (weighted glyph bottoms), and its only other
+    /// upright weight is OS/2 usWeightClass **800** (declared as ExtraBold).
+    /// MarkdownUI's default `.semibold` heading weight resolves to that 800
+    /// ExtraBold — every heading then reads as a wall of bold. The theme
+    /// forces `headingFontWeight = .regular` so headings differ from body
+    /// only by size + color + rule, and `strongFontWeight = .bold` so
+    /// `**emphasis**` runs explicitly request the heavy variant for the
+    /// places where weight contrast actually matters.
+    /// See TYPOGRAPHY.md → Standard Erin for the rationale.
+    static let standardErinLight = MDVTheme(
+        id: "standard-erin-light",
+        name: "Standard Erin Light",
+        isDark: false,
+        background: Color(rgba: 0xFBF7E8FF),          // warm cream — gentler than pure white but still standard-density
+        secondaryBackground: Color(rgba: 0xF0EAD3FF), // deeper cream for code blocks / table stripes
+        text: Color(rgba: 0x2C2A26FF),                // warm dark — not pure black
+        secondaryText: Color(rgba: 0x5C584FFF),
+        tertiaryText: Color(rgba: 0x8B8576FF),
+        heading: Color(rgba: 0x1A1814FF),
+        link: Color(rgba: 0x1B4F8AFF),                // deep blue
+        strong: Color(rgba: 0x2C2A26FF),              // tier 1 (= body); OpenDyslexic-Bold is the visual lift
+        border: Color(rgba: 0xE0D8BEFF),
+        divider: Color(rgba: 0xE0D8BEFF),
+        blockquoteBar: Color(rgba: 0xB0623EFF),       // terracotta accent
+        sidebarTint: Color(rgba: 0xFBF7E8FF),
+        sidebarTintOpacity: 0.55,
+        bodyFontFamily: .custom(FontRegistration.dyslexiaBodyFamily),
+        baseFontSize: 15,                             // one step under the 16pt default — OpenDyslexic's x-height is large enough that 15pt reads ≈16pt SF; pulls the page back from looking outsized
+        // Other typography knobs intentionally left at cross-theme defaults.
+        // The font is the theme.
+        headingFontWeight: .regular,                  // see doc-comment above — OpenDyslexic only ships 400 + 800
+        strongFontWeight: .bold,                      // explicit so **emphasis** picks up the 800 variant
+        accent: Color(rgba: 0xB0623EFF),              // terracotta
+        codePalette: .dyslexiaLightPalette
+    )
+
+    /// Dark variant of Standard Erin. Same family resolution + same weight
+    /// overrides as the light variant; defaults-everywhere typography. Deep
+    /// navy bg (not pure black) with warm cream text (not pure white) —
+    /// matches the light variant's choice to stay out of pure-value
+    /// territory without inflating leading or measure.
+    static let standardErinDark = MDVTheme(
+        id: "standard-erin-dark",
+        name: "Standard Erin Dark",
+        isDark: true,
+        background: Color(rgba: 0x1B2233FF),          // deep navy — not pure black
+        secondaryBackground: Color(rgba: 0x252D40FF), // raised navy for code blocks / table stripes
+        text: Color(rgba: 0xE5DCC5FF),                // warm cream — not pure white
+        secondaryText: Color(rgba: 0xB0A88FFF),
+        tertiaryText: Color(rgba: 0x847C6AFF),
+        heading: Color(rgba: 0xF0E8CFFF),
+        link: Color(rgba: 0xF5C97AFF),                // warm amber
+        strong: Color(rgba: 0xE5DCC5FF),              // tier 1 (= body)
+        border: Color(rgba: 0x2E3A50FF),
+        divider: Color(rgba: 0x2E3A50FF),
+        blockquoteBar: Color(rgba: 0xC99A4AFF),       // dusty amber accent
+        sidebarTint: Color(rgba: 0x1B2233FF),
+        sidebarTintOpacity: 0.32,
+        bodyFontFamily: .custom(FontRegistration.dyslexiaBodyFamily),
+        baseFontSize: 15,
+        headingFontWeight: .regular,
+        strongFontWeight: .bold,
+        accent: Color(rgba: 0xC99A4AFF),
+        codePalette: .dyslexiaDarkPalette
+    )
+
     static let all: [MDVTheme] = [
         .highContrast,
         .sevilla,
@@ -739,6 +882,8 @@ extension MDVTheme {
         .solarizedDark,
         .phosphor,
         .twilight,
+        .standardErinLight,
+        .standardErinDark,
     ]
 
     static let `default`: MDVTheme = .highContrast
