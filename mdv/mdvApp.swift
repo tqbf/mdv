@@ -108,6 +108,21 @@ struct mdvApp: App {
                 }
                 .keyboardShortcut("s", modifiers: [.command, .control])
                 Divider()
+                // Zoom: scales body type via ThemeManager.fontScale.
+                // Headings are em-relative so they scale with body. ⌘= is
+                // the macOS-standard "zoom in" binding (same physical key
+                // as ⌘+ — shift is irrelevant under .command). ⌘0 is
+                // already taken by Jump-to-Placeholder, so Actual Size
+                // gets a menu item only.
+                Button("Zoom In") { themes.zoomIn() }
+                    .keyboardShortcut("=", modifiers: .command)
+                    .disabled(themes.fontScale >= ThemeManager.fontScaleMax)
+                Button("Zoom Out") { themes.zoomOut() }
+                    .keyboardShortcut("-", modifiers: .command)
+                    .disabled(themes.fontScale <= ThemeManager.fontScaleMin)
+                Button("Actual Size") { themes.resetZoom() }
+                    .disabled(themes.fontScale == 1.0)
+                Divider()
                 Toggle(
                     themes.current.smartTypographyAllowed
                         ? "Smart Typography"

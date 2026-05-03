@@ -90,12 +90,6 @@ struct ContentView: View {
     /// `selectedEntry` so the resulting onChange tick skips the backStack
     /// push. Cleared at the end of that tick.
     @State private var suppressBackStackPush = false
-    /// Mirror of `topVisibleBlock` updated via `.onChange`. Used as the
-    /// "scroll snapshot we're leaving" when pushing onto `backStack`,
-    /// because the computed `topVisibleBlock` reflects whatever's visible
-    /// *now* — by the time we want to capture it on a navigation event,
-    /// `visibleBlocks` may have started churning.
-    @State private var currentTopBlock: Int = 0
     /// If a fragment-bearing link triggers a cross-document load, the
     /// fragment is stashed here and consumed once `rawMarkdown` updates
     /// (the headings only exist after the file is read).
@@ -167,6 +161,12 @@ struct ContentView: View {
         let blockIndex: Int
         var id: Int { blockIndex }
     }
+
+    // Zoom HUD: shown for ~0.9s whenever themes.fontScale changes,
+    // dismissed via a debounced DispatchWorkItem so repeated ⌘= taps
+    // keep the HUD visible without flicker.
+    @State private var zoomHUDVisible = false
+    @State private var zoomHUDDismiss: DispatchWorkItem?
 
     // Find
     @State private var isSearching = false
@@ -279,26 +279,22 @@ struct ContentView: View {
             // (goBack/goForward) is in progress, if there's no previous
             // entry (first load), or if the path didn't actually change
             // (history.add creates a fresh entry on every visit — those
-            // re-visits shouldn't clutter the stack). `currentTopBlock`
+            // re-visits shouldn't clutter the stack). `topVisibleBlock`
             // here still reflects the doc we're leaving because the new
-            // doc's blocks haven't fired their onAppear yet.
-            let leavingTop = currentTopBlock
+            // doc's blocks haven't fired their onAppear yet — read the
+            // computed property directly rather than mirroring it via
+            // another .onChange (writing state from a render-driven
+            // onChange triggers infinite re-render in SwiftUI).
+            let leavingTop = topVisibleBlock
             defer {
                 suppressBackStackPush = false
                 previousSelectedEntry = selectedEntry
-                // New doc — visibleBlocks will repopulate from 0 upward
-                // as blocks appear; reset the mirror so we don't carry
-                // the leaving doc's value.
-                currentTopBlock = 0
             }
             guard !suppressBackStackPush,
                   let prev = previousSelectedEntry,
                   prev.path != selectedEntry?.path else { return }
             backStack.append(NavSnapshot(entry: prev, topBlockIndex: leavingTop))
             forwardStack.removeAll()
-        }
-        .onChange(of: topVisibleBlock) { newValue in
-            currentTopBlock = newValue
         }
     }
 
@@ -960,26 +956,21 @@ struct ContentView: View {
     /// active one. Selection persists via ThemeManager (@AppStorage).
     private var themeMenu: some View {
         Menu {
-            Button {
-                themes.setSelection(ThemeManager.systemID)
-            } label: {
-                if themes.selectedID == ThemeManager.systemID {
-                    Label(ThemeManager.systemDisplayName, systemImage: "checkmark")
-                } else {
-                    Text(ThemeManager.systemDisplayName)
-                }
-            }
+            // Toggle inside a Menu renders as a native macOS checked menu
+            // item (system-drawn checkmark, proper indentation for
+            // unselected siblings). The setter ignores `false` because
+            // you don't "uncheck" a theme — picking a different one is
+            // how you switch.
+            Toggle(ThemeManager.systemDisplayName, isOn: Binding(
+                get: { themes.selectedID == ThemeManager.systemID },
+                set: { picked in if picked { themes.setSelection(ThemeManager.systemID) } }
+            ))
             Divider()
             ForEach(MDVTheme.all) { theme in
-                Button {
-                    themes.set(theme)
-                } label: {
-                    if themes.selectedID == theme.id {
-                        Label(theme.name, systemImage: "checkmark")
-                    } else {
-                        Text(theme.name)
-                    }
-                }
+                Toggle(theme.name, isOn: Binding(
+                    get: { themes.selectedID == theme.id },
+                    set: { picked in if picked { themes.set(theme) } }
+                ))
             }
         } label: {
             Image(systemName: "paintpalette")
@@ -1288,7 +1279,48 @@ struct ContentView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .overlay(alignment: .center) {
+            if zoomHUDVisible {
+                zoomHUD
+                    .transition(.opacity.combined(with: .scale(scale: 0.92)))
+            }
+        }
+        .onChange(of: themes.fontScale) { _ in showZoomHUD() }
         .animation(.easeOut(duration: 0.20), value: isSearching)
+        .animation(.easeOut(duration: 0.18), value: zoomHUDVisible)
+    }
+
+    /// macOS volume/brightness-style transient indicator. Centered over
+    /// the content pane, fades in on zoom change, fades out ~0.9s after
+    /// the last change.
+    private var zoomHUD: some View {
+        let pct = Int((themes.fontScale * 100).rounded())
+        return Text("\(pct)%")
+            .font(.system(size: 36, weight: .semibold, design: .rounded))
+            .foregroundStyle(themes.current.text)
+            .monospacedDigit()
+            .padding(.horizontal, 28)
+            .padding(.vertical, 18)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(themes.current.secondaryBackground.opacity(0.92))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(themes.current.border, lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(themes.current.isDark ? 0.45 : 0.18), radius: 14, y: 4)
+            .allowsHitTesting(false)
+    }
+
+    private func showZoomHUD() {
+        zoomHUDVisible = true
+        zoomHUDDismiss?.cancel()
+        let task = DispatchWorkItem {
+            zoomHUDVisible = false
+        }
+        zoomHUDDismiss = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: task)
     }
 
     private var blocks: [String] {
@@ -1977,7 +2009,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
-                .markdownTheme(themes.current.markdownTheme)
+                .markdownTheme(themes.current.markdownTheme(scale: themes.fontScale))
                 .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
                 .markdownImageProvider(LocalImageProvider(
                     baseURL: currentDocumentDirectory,
@@ -2090,7 +2122,7 @@ struct ContentView: View {
     private func goBack() {
         guard let prev = backStack.popLast() else { return }
         if let current = selectedEntry {
-            forwardStack.append(NavSnapshot(entry: current, topBlockIndex: currentTopBlock))
+            forwardStack.append(NavSnapshot(entry: current, topBlockIndex: topVisibleBlock))
         }
         applySnapshot(prev)
     }
@@ -2098,7 +2130,7 @@ struct ContentView: View {
     private func goForward() {
         guard let next = forwardStack.popLast() else { return }
         if let current = selectedEntry {
-            backStack.append(NavSnapshot(entry: current, topBlockIndex: currentTopBlock))
+            backStack.append(NavSnapshot(entry: current, topBlockIndex: topVisibleBlock))
         }
         applySnapshot(next)
     }
@@ -2109,7 +2141,7 @@ struct ContentView: View {
     /// nothing is loaded yet.
     private func pushSameDocSnapshot() {
         guard let current = selectedEntry else { return }
-        backStack.append(NavSnapshot(entry: current, topBlockIndex: currentTopBlock))
+        backStack.append(NavSnapshot(entry: current, topBlockIndex: topVisibleBlock))
         forwardStack.removeAll()
     }
 
@@ -2656,16 +2688,12 @@ struct ContentView: View {
         }
     }
 
-    /// Persist the current scroll anchor for `entry`. Reads `topVisibleBlock`
-    /// directly (== `visibleBlocks.min()`) rather than the `currentTopBlock`
-    /// mirror, because the back-stack handler on `body` resets
-    /// `currentTopBlock = 0` in its defer block, and SwiftUI's invocation
-    /// order across multiple onChange handlers for the same key isn't
-    /// guaranteed — empirically that defer can fire before this save runs.
-    /// `visibleBlocks` is safe to read here: it's only wiped by the
-    /// `.onChange(of: rawMarkdown)` handler, which fires on the *next*
-    /// runloop tick after `loadCurrentEntry` mutates `rawMarkdown`, well
-    /// after we've already saved.
+    /// Persist the current scroll anchor for `entry`. Reads
+    /// `topVisibleBlock` (== `visibleBlocks.min()`). `visibleBlocks` is
+    /// safe to read here: it's only wiped by the `.onChange(of: rawMarkdown)`
+    /// handler, which fires on the *next* runloop tick after
+    /// `loadCurrentEntry` mutates `rawMarkdown`, well after we've
+    /// already saved.
     ///
     /// Caller must invoke this BEFORE any code path that mutates `rawMarkdown`
     /// for a different file — otherwise `blocks` will already reflect the

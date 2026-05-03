@@ -408,7 +408,13 @@ extension CodePalette {
 extension MDVTheme {
     /// Mirror of `Theme.gitHub`'s shape but with explicit per-theme colors. Same
     /// block builders so spacing/typography stays consistent across themes.
-    var markdownTheme: Theme {
+    var markdownTheme: Theme { markdownTheme(scale: 1.0) }
+
+    /// Same as `markdownTheme` but multiplies the body font size by `scale`.
+    /// Heading sizes are em-relative so they scale automatically with body;
+    /// per-element point spacing is left as-is to match browser-style zoom
+    /// (text grows but the column doesn't change shape).
+    func markdownTheme(scale: CGFloat) -> Theme {
         let bg = self.background
         let sbg = self.secondaryBackground
         let txt = self.text
@@ -422,7 +428,7 @@ extension MDVTheme {
         let strong = self.strong
 
         let family = self.bodyFontFamily
-        let bodySize = self.baseFontSize
+        let bodySize = self.baseFontSize * scale
         let lineEm = self.paragraphLineSpacingEm
         let h1 = self.h1SizeEm
         let h2 = self.h2SizeEm
@@ -965,16 +971,30 @@ final class ThemeManager: ObservableObject {
     static let systemDisplayName = "System"
 
     @AppStorage("mdv_theme_id") private var storedID: String = MDVTheme.default.id
+    @AppStorage("mdv_font_scale") private var storedFontScale: Double = 1.0
 
     /// What the user picked — may be `systemID`. Use this for menu
     /// checkmarks; use `current` for actual rendering.
     @Published private(set) var selectedID: String = MDVTheme.default.id
     @Published var current: MDVTheme = .default
 
+    /// Persistent zoom multiplier applied on top of the active theme's
+    /// `baseFontSize`. 1.0 = theme default. Stepped via `zoomIn` /
+    /// `zoomOut` / `resetZoom`; clamped to `[fontScaleMin, fontScaleMax]`.
+    @Published var fontScale: Double = 1.0
+
+    /// Zoom step (10%) and floor/ceiling. The floor stops a font from
+    /// becoming illegibly small; the ceiling avoids body type that
+    /// overflows the column at typical window sizes.
+    static let fontScaleStep = 0.10
+    static let fontScaleMin  = 0.60
+    static let fontScaleMax  = 2.50
+
     private var appearanceObservation: NSKeyValueObservation?
 
     init() {
         self.selectedID = storedID
+        self.fontScale = Self.clampScale(storedFontScale)
         self.current = Self.resolve(id: storedID)
         // KVO on effectiveAppearance: the OS posts when the user toggles
         // dark mode, when scheduled night-shift fires, or when the
@@ -1002,6 +1022,24 @@ final class ThemeManager: ObservableObject {
         selectedID = id
         storedID = id
         current = Self.resolve(id: id)
+    }
+
+    func zoomIn()    { setFontScale(fontScale + Self.fontScaleStep) }
+    func zoomOut()   { setFontScale(fontScale - Self.fontScaleStep) }
+    func resetZoom() { setFontScale(1.0) }
+
+    private func setFontScale(_ s: Double) {
+        let clamped = Self.clampScale(s)
+        // Round to one decimal so repeated +/− don't accrue float drift
+        // (1.0 + 0.1 + 0.1 ≠ 1.2 exactly otherwise).
+        let snapped = (clamped * 10).rounded() / 10
+        guard snapped != fontScale else { return }
+        fontScale = snapped
+        storedFontScale = snapped
+    }
+
+    private static func clampScale(_ s: Double) -> Double {
+        min(max(s, fontScaleMin), fontScaleMax)
     }
 
     private func systemAppearanceChanged() {
