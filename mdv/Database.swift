@@ -55,7 +55,18 @@ final class Database {
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        if sqlite3_open(url.path, &db) != SQLITE_OK {
+        // Open with SQLITE_OPEN_FULLMUTEX so the single shared connection
+        // is internally serialized: macOS ships libsqlite3 in multi-thread
+        // mode (`sqlite3_threadsafe()` returns 2), under which a single
+        // connection may NOT be used concurrently from multiple threads.
+        // We hit that pattern at startup — HistoryManager.init runs
+        // `Database.shared.reindex(...)` on the bg queue while
+        // BookmarksManager.init runs `loadBookmarks()` and the first file
+        // load runs `loadScrollPosition(...)` on main. Without the mutex,
+        // overlapping `sqlite3_step` calls can SIGSEGV in the pager,
+        // return SQLITE_MISUSE silently, or corrupt the DB file.
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(url.path, &db, flags, nil) != SQLITE_OK {
             NSLog("[mdv] failed to open db at %@", url.path)
             db = nil
             return
