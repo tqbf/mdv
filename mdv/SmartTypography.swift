@@ -25,6 +25,17 @@ func smartenMarkdown(_ source: String) -> String {
         return source
     }
 
+    // GFM tables: a single `\n\n`-separated block whose interior contains a
+    // separator row like `|---|---|---|`. Smartening rewrites `---` → `—`
+    // (em-dash), which then makes the line `|—|—|—|` and cmark-gfm fails to
+    // recognize it as a table — the whole block falls back to raw text with
+    // visible `|` separators. Detect via the separator row and skip
+    // smartening for the entire block. Cells lose curly punctuation but at
+    // least render *as a table*, which is the bigger win.
+    if looksLikeTableBlock(source) {
+        return source
+    }
+
     var result = ""
     result.reserveCapacity(source.count)
 
@@ -179,6 +190,25 @@ func smartenMarkdown(_ source: String) -> String {
     }
 
     return result
+}
+
+/// True iff the block contains a GFM table separator row — a line whose
+/// characters are entirely `|`, `-`, `:`, and whitespace, and which contains
+/// at least one `-` and at least two `|`. We don't try to fully validate the
+/// table, just notice that a separator row is in there: cmark-gfm's table
+/// recognizer fires on the same cue, so if we'd corrupt it we'd corrupt the
+/// table.
+private func looksLikeTableBlock(_ source: String) -> Bool {
+    let allowed: Set<Character> = ["|", "-", ":", " ", "\t"]
+    for raw in source.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { continue }
+        if !line.allSatisfy({ allowed.contains($0) }) { continue }
+        if line.contains("-") && line.filter({ $0 == "|" }).count >= 2 {
+            return true
+        }
+    }
+    return false
 }
 
 /// True if the character preceding a `"` or `'` puts us in "opening quote"
