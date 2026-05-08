@@ -191,6 +191,7 @@ struct ContentView: View {
     @State private var currentMatchIndex: Int = 0
     @State private var findFieldRequestFocus: Bool = false
     @StateObject private var keyMonitor = KeyMonitor()
+    @StateObject private var selectionEscapeMonitor = SelectionEscapeMonitor()
 
     // Global (cross-history) search
     @State private var globalQuery: String = ""
@@ -251,6 +252,40 @@ struct ContentView: View {
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 if event.keyCode == 53 {
                     onEscape()
+                    return nil
+                }
+                return event
+            }
+        }
+
+        func uninstall() {
+            if let m = monitor {
+                NSEvent.removeMonitor(m)
+                monitor = nil
+            }
+        }
+
+        deinit { uninstall() }
+    }
+
+    /// Always-on Esc handler that clears the block selection when one
+    /// exists. Separate from `KeyMonitor` (which only lives while find is
+    /// open and would clobber its install/uninstall lifecycle) and from
+    /// any text-field Esc handling (we read the field-editor state to
+    /// avoid stealing Esc from a focused field). The closure pattern
+    /// re-reads state via the assigned blocks rather than capturing it
+    /// at install time, so the closure sees the live values.
+    final class SelectionEscapeMonitor: ObservableObject {
+        var shouldHandle: () -> Bool = { false }
+        var onEscape: () -> Void = {}
+        private var monitor: Any?
+
+        func install() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                if event.keyCode == 53, self.shouldHandle() {
+                    self.onEscape()
                     return nil
                 }
                 return event
@@ -496,6 +531,20 @@ struct ContentView: View {
         .onAppear {
             paneTracker.sidebarRightEdge = sidebarCollapsed ? 0 : (sidebarWidth + 8) // include drag handle width
             paneTracker.install()
+            // Esc-to-clear-selection. The closures re-read state every time
+            // they fire, so we don't have to reinstall the monitor when
+            // `selectedBlocks` or `isSearching` change. `shouldHandle`
+            // gates on (selection non-empty) AND (find bar closed) AND
+            // (no field editor focused) — Esc inside the find bar is
+            // owned by `keyMonitor`, and Esc inside any other text field
+            // belongs to that field.
+            selectionEscapeMonitor.shouldHandle = {
+                !selectedBlocks.isEmpty && !isSearching && !mdvApp.isFieldEditorFocused()
+            }
+            selectionEscapeMonitor.onEscape = {
+                selectedBlocks = []
+            }
+            selectionEscapeMonitor.install()
             if let url = initialURL {
                 loadFile(url)
             } else if let last = history.entries.first {
@@ -511,6 +560,7 @@ struct ContentView: View {
                 persistScrollPosition(for: entry)
             }
             paneTracker.uninstall()
+            selectionEscapeMonitor.uninstall()
         }
         .onChange(of: sidebarWidth) { newValue in
             if !sidebarCollapsed {
