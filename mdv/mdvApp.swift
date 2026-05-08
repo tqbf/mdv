@@ -73,6 +73,39 @@ struct mdvApp: App {
                     }
                 }
             }
+            // Replace the system pasteboard group so ⌘C / ⌘A are routed
+            // through our handlers. Cut / Paste are kept as plain
+            // responder-chain dispatches so text fields (find bar, sidebar
+            // search, etc.) keep working. Copy / Select-All check whether
+            // the focused responder is a field editor and either delegate
+            // to it via the responder chain or fall through to the
+            // markdown-block handlers in ContentView.
+            CommandGroup(replacing: .pasteboard) {
+                Button("Cut") {
+                    NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("x", modifiers: .command)
+                Button("Copy") {
+                    if mdvApp.isFieldEditorFocused() {
+                        NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+                    } else {
+                        NotificationCenter.default.post(name: .copyMarkdown, object: nil)
+                    }
+                }
+                .keyboardShortcut("c", modifiers: .command)
+                Button("Paste") {
+                    NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil)
+                }
+                .keyboardShortcut("v", modifiers: .command)
+                Button("Select All") {
+                    if mdvApp.isFieldEditorFocused() {
+                        NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: nil)
+                    } else {
+                        NotificationCenter.default.post(name: .selectAllBlocks, object: nil)
+                    }
+                }
+                .keyboardShortcut("a", modifiers: .command)
+            }
             CommandGroup(after: .pasteboard) {
                 Divider()
                 Button("Find…") {
@@ -182,6 +215,20 @@ struct mdvApp: App {
         }
         return "Slot \(n) — Empty"
     }
+
+    /// True if the key window's first responder is a text field editor.
+    /// Used by the Edit > Copy / Select All buttons to decide whether to
+    /// delegate to the responder chain (text field present) or fall
+    /// through to the markdown block-selection handlers (markdown view
+    /// active). NSText.isFieldEditor catches the field editor that
+    /// NSTextField rents from the window; explicit NSTextView covers
+    /// SwiftUI-driven text views in case any show up.
+    static func isFieldEditorFocused() -> Bool {
+        guard let resp = NSApp.keyWindow?.firstResponder else { return false }
+        if let text = resp as? NSText, text.isFieldEditor { return true }
+        if resp is NSTextView { return true }
+        return false
+    }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -215,4 +262,6 @@ extension Notification.Name {
     static let navigateBack = Notification.Name("navigateBack")
     static let navigateForward = Notification.Name("navigateForward")
     static let toggleSidebar = Notification.Name("toggleSidebar")
+    static let copyMarkdown = Notification.Name("copyMarkdown")
+    static let selectAllBlocks = Notification.Name("selectAllBlocks")
 }
