@@ -108,21 +108,19 @@ struct ContentView: View {
     /// visible block, which is what we anchor a new bookmark to.
     @State private var visibleBlocks: Set<Int> = []
 
-    // Selection model — block-level. The user click-drags to select whole
-    // blocks at a time (no fine-grained text selection); ⌘C copies the
-    // selected blocks' source markdown joined with `\n\n`. If the selection
-    // covers any heading, that heading's section is auto-expanded so
-    // dragging across a heading line "feels" like selecting the section.
-    /// Block indices in the current selection.
-    @State private var selectedBlocks: Set<Int> = []
-    /// Block where the active drag started, or nil when no drag in flight.
-    /// Captured on the first `.onChanged` tick so subsequent ticks compute
-    /// the range from a stable origin.
-    @State private var dragSelectionStart: Int? = nil
-    /// Per-block frames in the markdown content's coordinate space, used
-    /// to map a drag's `value.location` back to a block index. Populated
-    /// by a PreferenceKey emitted from each block's `.background`.
-    @State private var blockFrames: [Int: CGRect] = [:]
+    // Heading-click copy. Clicking a heading copies that heading's full
+    // section (heading + content down to the next same-or-higher-level
+    // heading) as raw markdown source. `flashingBlocks` paints a brief
+    // accent fill on each block in the just-copied section as visual
+    // confirmation, then auto-clears. Normal click-drag still selects
+    // text via `.textSelection(.enabled)` — block-level selection is
+    // intentionally gone (annoying in practice when you actually wanted
+    // to grab a phrase).
+    @State private var flashingBlocks: Set<Int> = []
+    /// Workitem for the flash-clear timer, kept around so re-clicks can
+    /// cancel and restart cleanly (otherwise rapid clicks would race the
+    /// clear of an earlier flash).
+    @State private var flashClearWork: DispatchWorkItem? = nil
     /// Block the mouse is currently hovering. Drives the bookmark-anchor
     /// indicator (subtle accent stripe + tint) so the user can see what
     /// ⌘D will bookmark — there's no caret in a viewer.
@@ -191,7 +189,6 @@ struct ContentView: View {
     @State private var currentMatchIndex: Int = 0
     @State private var findFieldRequestFocus: Bool = false
     @StateObject private var keyMonitor = KeyMonitor()
-    @StateObject private var selectionEscapeMonitor = SelectionEscapeMonitor()
 
     // Global (cross-history) search
     @State private var globalQuery: String = ""
@@ -268,39 +265,6 @@ struct ContentView: View {
         deinit { uninstall() }
     }
 
-    /// Always-on Esc handler that clears the block selection when one
-    /// exists. Separate from `KeyMonitor` (which only lives while find is
-    /// open and would clobber its install/uninstall lifecycle) and from
-    /// any text-field Esc handling (we read the field-editor state to
-    /// avoid stealing Esc from a focused field). The closure pattern
-    /// re-reads state via the assigned blocks rather than capturing it
-    /// at install time, so the closure sees the live values.
-    final class SelectionEscapeMonitor: ObservableObject {
-        var shouldHandle: () -> Bool = { false }
-        var onEscape: () -> Void = {}
-        private var monitor: Any?
-
-        func install() {
-            guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self else { return event }
-                if event.keyCode == 53, self.shouldHandle() {
-                    self.onEscape()
-                    return nil
-                }
-                return event
-            }
-        }
-
-        func uninstall() {
-            if let m = monitor {
-                NSEvent.removeMonitor(m)
-                monitor = nil
-            }
-        }
-
-        deinit { uninstall() }
-    }
 
     private let minSidebarWidth: CGFloat = 180
     private let maxSidebarWidth: CGFloat = 400
@@ -398,9 +362,7 @@ struct ContentView: View {
             forgetExternalEditor: { editorAppPath = "" },
             navigateBack: goBack,
             navigateForward: goForward,
-            toggleSidebar: toggleSidebar,
-            copyMarkdown: copySelectionAsMarkdown,
-            selectAllBlocks: selectAllBlocks
+            toggleSidebar: toggleSidebar
         ))
         .onOpenURL { url in
             loadFile(url)
@@ -431,13 +393,10 @@ struct ContentView: View {
         }
         .onChange(of: rawMarkdown) { _ in
             if isSearching { recomputeMatches() }
-            // Drop the block selection when the document content changes.
-            // FileWatcher reloads (external editor save) and history-driven
-            // doc swaps both come through here; carrying the selection
-            // across either is wrong — block indices no longer refer to the
-            // same content.
-            selectedBlocks = []
-            blockFrames = [:]
+            // Drop any in-progress copy flash on doc swap — block indices
+            // no longer refer to the same content.
+            flashClearWork?.cancel()
+            flashingBlocks = []
             // Visible-block tracking carries indices from the leaving doc.
             // We can't just `removeAll()`: SwiftUI's `ForEach(id: \.offset)`
             // keeps blocks with the same offset mounted across a doc swap,
@@ -531,20 +490,6 @@ struct ContentView: View {
         .onAppear {
             paneTracker.sidebarRightEdge = sidebarCollapsed ? 0 : (sidebarWidth + 8) // include drag handle width
             paneTracker.install()
-            // Esc-to-clear-selection. The closures re-read state every time
-            // they fire, so we don't have to reinstall the monitor when
-            // `selectedBlocks` or `isSearching` change. `shouldHandle`
-            // gates on (selection non-empty) AND (find bar closed) AND
-            // (no field editor focused) — Esc inside the find bar is
-            // owned by `keyMonitor`, and Esc inside any other text field
-            // belongs to that field.
-            selectionEscapeMonitor.shouldHandle = {
-                !selectedBlocks.isEmpty && !isSearching && !mdvApp.isFieldEditorFocused()
-            }
-            selectionEscapeMonitor.onEscape = {
-                selectedBlocks = []
-            }
-            selectionEscapeMonitor.install()
             if let url = initialURL {
                 loadFile(url)
             } else if let last = history.entries.first {
@@ -560,7 +505,6 @@ struct ContentView: View {
                 persistScrollPosition(for: entry)
             }
             paneTracker.uninstall()
-            selectionEscapeMonitor.uninstall()
         }
         .onChange(of: sidebarWidth) { newValue in
             if !sidebarCollapsed {
@@ -1251,6 +1195,7 @@ struct ContentView: View {
                         LazyVStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { (idx, block) in
                                 blockView(block: block, idx: idx)
+                                    .modifier(BlockTextSelection(isHeading: isHeadingBlock(idx)))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(
@@ -1262,23 +1207,24 @@ struct ContentView: View {
                                             .animation(.easeOut(duration: 0.12), value: hoveredBlock)
                                     )
                                     .background(
-                                        // Selection highlight — paints over the block-background
-                                        // tint. Accent at 0.18 opacity matches macOS
-                                        // `selectedContentBackgroundColor` density without
-                                        // saturating the body text underneath.
+                                        // Brief flash after a heading-click copy: the
+                                        // copied section's blocks paint with the accent
+                                        // tint for ~0.6s, then clear. Gives the user
+                                        // confirmation that the click did something
+                                        // without a popup or toast.
                                         Group {
-                                            if selectedBlocks.contains(idx) {
+                                            if flashingBlocks.contains(idx) {
                                                 RoundedRectangle(cornerRadius: 4)
                                                     .fill(themes.current.accent.opacity(0.18))
                                             }
                                         }
-                                        .animation(.easeOut(duration: 0.10), value: selectedBlocks)
+                                        .animation(.easeOut(duration: 0.18), value: flashingBlocks)
                                     )
                                     .overlay(alignment: .leading) {
                                         // Accent stripe along the left edge of the hovered block —
                                         // this is the "you will bookmark here" affordance, since a
                                         // read-only viewer has no insertion caret.
-                                        if hoveredBlock == idx && highlightColor(forBlock: idx) == .clear && !selectedBlocks.contains(idx) {
+                                        if hoveredBlock == idx && highlightColor(forBlock: idx) == .clear && !flashingBlocks.contains(idx) {
                                             Rectangle()
                                                 .fill(themes.current.accent)
                                                 .frame(width: 2)
@@ -1286,18 +1232,6 @@ struct ContentView: View {
                                                 .transition(.opacity)
                                         }
                                     }
-                                    .background(
-                                        // Frame tracker. PreferenceKey accumulates frames from
-                                        // every block; ScrollView's `.onPreferenceChange` reads
-                                        // them and stashes in `blockFrames` so the drag gesture
-                                        // can map cursor y-coords back to a block index.
-                                        GeometryReader { proxy in
-                                            Color.clear.preference(
-                                                key: BlockFramesKey.self,
-                                                value: [idx: proxy.frame(in: .named("markdownContent"))]
-                                            )
-                                        }
-                                    )
                                     .contentShape(Rectangle())
                                     .id("block-\(idx)")
                                     .onAppear { visibleBlocks.insert(idx) }
@@ -1308,24 +1242,23 @@ struct ContentView: View {
                                     .onHover { inside in
                                         if inside {
                                             hoveredBlock = idx
-                                        } else if hoveredBlock == idx {
-                                            hoveredBlock = nil
+                                            if isHeadingBlock(idx) {
+                                                NSCursor.pointingHand.push()
+                                            }
+                                        } else {
+                                            if hoveredBlock == idx { hoveredBlock = nil }
+                                            if isHeadingBlock(idx) {
+                                                NSCursor.pop()
+                                            }
                                         }
                                     }
-                                    .onTapGesture(count: 2) {
-                                        // Double-click on a heading → select the whole section.
-                                        // Non-heading blocks: passthrough, no-op (single-click
-                                        // handler clears selection below).
+                                    .onTapGesture {
+                                        // Heading single-click → copy the whole section
+                                        // as markdown to the pasteboard. Non-heading
+                                        // blocks: ignore — `.textSelection(.enabled)`
+                                        // owns drag-to-select for prose.
                                         if isHeadingBlock(idx) {
-                                            selectSection(headingAt: idx)
-                                        }
-                                    }
-                                    .onTapGesture(count: 1) {
-                                        // Single click anywhere clears the selection — matches the
-                                        // standard Finder/Notes behavior of dropping selection on
-                                        // a stray click.
-                                        if !selectedBlocks.isEmpty {
-                                            selectedBlocks = []
+                                            copySection(headingAt: idx)
                                         }
                                     }
                             }
@@ -1335,37 +1268,6 @@ struct ContentView: View {
                         .frame(maxWidth: themes.current.articleMaxWidth ?? .infinity, alignment: .leading)
                         .frame(maxWidth: .infinity,
                                alignment: themes.current.articleMaxWidth == nil ? .leading : .center)
-                        .coordinateSpace(name: "markdownContent")
-                        .onPreferenceChange(BlockFramesKey.self) { newFrames in
-                            // Replace rather than merge — when blocks reflow on theme/font
-                            // change, stale frames for re-rendered indices need to clear.
-                            blockFrames = newFrames
-                        }
-                        .simultaneousGesture(
-                            // Block-level drag-to-select. `simultaneousGesture` rather
-                            // than `.gesture` so child `.onTapGesture` handlers on each
-                            // block still fire on bare clicks — a parent
-                            // `.gesture(DragGesture)` (even with minimumDistance > 0)
-                            // suppresses descendants' tap recognizers, so single-click
-                            // to clear the selection wouldn't fire reliably. Drag-only
-                            // path is fine here because tap and drag are mutually
-                            // exclusive at the user level: a click without movement
-                            // never triggers the drag's `onChanged` (translation stays
-                            // 0), and a movement-bearing drag never delivers a tap to
-                            // the block underneath.
-                            DragGesture(minimumDistance: 4, coordinateSpace: .named("markdownContent"))
-                                .onChanged { value in
-                                    if dragSelectionStart == nil {
-                                        dragSelectionStart = blockAt(y: value.startLocation.y)
-                                    }
-                                    guard let start = dragSelectionStart,
-                                          let end = blockAt(y: value.location.y) else { return }
-                                    updateDragSelection(start: start, end: end)
-                                }
-                                .onEnded { _ in
-                                    dragSelectionStart = nil
-                                }
-                        )
                     }
                     .onChange(of: currentMatchIndex) { _ in
                         scrollToCurrentMatch(proxy: proxy)
@@ -1519,11 +1421,9 @@ struct ContentView: View {
         return result
     }
 
-    // MARK: - Block selection
+    // MARK: - Section copy
 
     /// True if the block at `idx` is an ATX heading (`#`, `##`, `###`).
-    /// Used to gate the double-click-selects-section affordance and to
-    /// trigger section-expansion during a drag.
     private func isHeadingBlock(_ idx: Int) -> Bool {
         tocHeadings.contains(where: { $0.blockIndex == idx })
     }
@@ -1543,75 +1443,29 @@ struct ContentView: View {
         return idx..<endIdx
     }
 
-    /// Map a y-coordinate (in `markdownContent` space) to the index of
-    /// the block it falls inside. Returns nil before frames are populated
-    /// or when the cursor is in the gap between blocks.
-    private func blockAt(y: CGFloat) -> Int? {
-        // Strict containment first.
-        if let hit = blockFrames.first(where: { _, frame in
-            frame.minY <= y && y <= frame.maxY
-        })?.key {
-            return hit
-        }
-        // In the inter-block gap: snap to whichever block we're closest
-        // to. Without this, dragging through the LazyVStack spacing would
-        // produce momentary nil and freeze the selection.
-        let above = blockFrames.filter { $0.value.maxY < y }.max(by: { $0.value.maxY < $1.value.maxY })
-        let below = blockFrames.filter { $0.value.minY > y }.min(by: { $0.value.minY < $1.value.minY })
-        switch (above, below) {
-        case let (.some(a), .some(b)):
-            return (y - a.value.maxY) <= (b.value.minY - y) ? a.key : b.key
-        case let (.some(a), nil): return a.key
-        case let (nil, .some(b)): return b.key
-        default: return nil
-        }
-    }
-
-    /// Drag-selection updater. Computes the natural [min, max] range from
-    /// the drag's start/end blocks, then expands for any heading whose
-    /// block falls inside that range — so dragging *through* a heading
-    /// pulls the rest of that section in. Iterates until stable so an
-    /// expansion that pulls in another heading also expands.
-    private func updateDragSelection(start: Int, end: Int) {
-        var lower = min(start, end)
-        var upper = max(start, end) + 1
-
-        var changed = true
-        while changed {
-            changed = false
-            for h in tocHeadings where h.blockIndex >= lower && h.blockIndex < upper {
-                let span = sectionRange(forHeadingAt: h.blockIndex)
-                if span.lowerBound < lower { lower = span.lowerBound; changed = true }
-                if span.upperBound > upper { upper = span.upperBound; changed = true }
-            }
-        }
-        selectedBlocks = Set(lower..<upper)
-    }
-
-    /// Select the entire section that begins at the heading in `idx`.
-    /// Triggered by double-click on a heading block.
-    private func selectSection(headingAt idx: Int) {
+    /// One-shot: copy the section starting at `idx` to the pasteboard
+    /// (joined by `\n\n` so it round-trips back into another markdown
+    /// doc), then briefly paint the section's blocks with the accent tint
+    /// as visual confirmation. The flash auto-clears after 0.6s; a
+    /// re-click cancels and restarts the clear so rapid copies don't
+    /// race each other.
+    private func copySection(headingAt idx: Int) {
         let span = sectionRange(forHeadingAt: idx)
-        selectedBlocks = Set(span)
-    }
-
-    /// Replace the selection with every block in the document.
-    private func selectAllBlocks() {
-        selectedBlocks = Set(0..<blocks.count)
-    }
-
-    /// Copy the selected blocks' source markdown to the pasteboard,
-    /// joined by `\n\n` so paragraph breaks survive a round-trip back
-    /// into another markdown document. No-op when nothing is selected.
-    private func copySelectionAsMarkdown() {
-        guard !selectedBlocks.isEmpty else { return }
-        let sorted = selectedBlocks.sorted()
-        let text = sorted.compactMap { idx in
-            idx < blocks.count ? blocks[idx] : nil
+        let text = span.compactMap { i in
+            i < blocks.count ? blocks[i] : nil
         }.joined(separator: "\n\n")
         guard !text.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+
+        // Visual confirmation flash.
+        flashClearWork?.cancel()
+        flashingBlocks = Set(span)
+        let work = DispatchWorkItem {
+            flashingBlocks = []
+        }
+        flashClearWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
     }
 
     // MARK: - Table of Contents
@@ -2975,18 +2829,21 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Block frame tracking
-
-/// PreferenceKey that accumulates each block's frame (in the markdown
-/// content's coordinate space) as the LazyVStack lays out. The drag
-/// gesture reads this dictionary to map cursor y-coords back to a block
-/// index. We `merge` rather than replace per-key so blocks above the
-/// viewport that haven't been laid out this pass don't drop their
-/// frames.
-private struct BlockFramesKey: PreferenceKey {
-    static var defaultValue: [Int: CGRect] = [:]
-    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
-        value.merge(nextValue()) { _, new in new }
+/// Per-block text-selection gating. Prose blocks have `.enabled` so the
+/// user can drag-copy phrases as normal. Heading blocks have `.disabled`
+/// so the parent `.textSelection(.enabled)` doesn't intercept clicks —
+/// otherwise the heading-single-click copy handler never fires. Lifted
+/// to a standalone modifier because inlining the conditional inside the
+/// `ForEach` blew the SwiftUI type-checker's expression-complexity
+/// budget for the surrounding view.
+private struct BlockTextSelection: ViewModifier {
+    let isHeading: Bool
+    func body(content: Content) -> some View {
+        if isHeading {
+            content.textSelection(.disabled)
+        } else {
+            content.textSelection(.enabled)
+        }
     }
 }
 
@@ -3130,52 +2987,9 @@ private struct NotificationHandlers: ViewModifier {
     let navigateBack: () -> Void
     let navigateForward: () -> Void
     let toggleSidebar: () -> Void
-    let copyMarkdown: () -> Void
-    let selectAllBlocks: () -> Void
 
     func body(content: Content) -> some View {
         content
-            .modifier(SelectionAndFileHandlers(
-                copyMarkdown: copyMarkdown,
-                selectAllBlocks: selectAllBlocks,
-                toggleSidebar: toggleSidebar,
-                openFile: openFile,
-                openFileInNewWindow: openFileInNewWindow,
-                openURLInWindow: openURLInWindow,
-                findInDocument: findInDocument,
-                searchHistory: searchHistory
-            ))
-            .modifier(BookmarkAndEditorHandlers(
-                toggleBookmark: toggleBookmark,
-                openBookmarkSlot: openBookmarkSlot,
-                setPlaceholder: setPlaceholder,
-                jumpToPlaceholder: jumpToPlaceholder,
-                chooseExternalEditor: chooseExternalEditor,
-                openInExternalEditor: openInExternalEditor,
-                forgetExternalEditor: forgetExternalEditor,
-                navigateBack: navigateBack,
-                navigateForward: navigateForward
-            ))
-    }
-}
-
-/// Half of `NotificationHandlers`. Splitting the long `.onReceive` chain
-/// keeps the SwiftUI type-checker under its expression-complexity budget
-/// — the combined view exceeded it after copy/select-all were added.
-private struct SelectionAndFileHandlers: ViewModifier {
-    let copyMarkdown: () -> Void
-    let selectAllBlocks: () -> Void
-    let toggleSidebar: () -> Void
-    let openFile: () -> Void
-    let openFileInNewWindow: () -> Void
-    let openURLInWindow: (URL) -> Void
-    let findInDocument: () -> Void
-    let searchHistory: () -> Void
-
-    func body(content: Content) -> some View {
-        content
-            .onReceive(NotificationCenter.default.publisher(for: .copyMarkdown)) { _ in copyMarkdown() }
-            .onReceive(NotificationCenter.default.publisher(for: .selectAllBlocks)) { _ in selectAllBlocks() }
             .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in toggleSidebar() }
             .onReceive(NotificationCenter.default.publisher(for: .openFile)) { _ in openFile() }
             .onReceive(NotificationCenter.default.publisher(for: .openFileInNewWindow)) { _ in openFileInNewWindow() }
@@ -3184,22 +2998,6 @@ private struct SelectionAndFileHandlers: ViewModifier {
             }
             .onReceive(NotificationCenter.default.publisher(for: .findInDocument)) { _ in findInDocument() }
             .onReceive(NotificationCenter.default.publisher(for: .searchHistory)) { _ in searchHistory() }
-    }
-}
-
-private struct BookmarkAndEditorHandlers: ViewModifier {
-    let toggleBookmark: () -> Void
-    let openBookmarkSlot: (Int) -> Void
-    let setPlaceholder: () -> Void
-    let jumpToPlaceholder: () -> Void
-    let chooseExternalEditor: () -> Void
-    let openInExternalEditor: () -> Void
-    let forgetExternalEditor: () -> Void
-    let navigateBack: () -> Void
-    let navigateForward: () -> Void
-
-    func body(content: Content) -> some View {
-        content
             .onReceive(NotificationCenter.default.publisher(for: .toggleBookmark)) { _ in toggleBookmark() }
             .onReceive(NotificationCenter.default.publisher(for: .openBookmarkSlot)) { notif in
                 if let n = notif.object as? Int { openBookmarkSlot(n) }
