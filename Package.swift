@@ -7,6 +7,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.2"),
         .package(url: "https://github.com/ChimeHQ/SwiftTreeSitter", from: "0.8.0"),
+        .package(url: "https://github.com/lukilabs/beautiful-mermaid-swift", from: "1.0.4"),
     ],
     targets: [
         .executableTarget(
@@ -15,6 +16,7 @@ let package = Package(
                 "CGrammars",
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 .product(name: "SwiftTreeSitter", package: "SwiftTreeSitter"),
+                .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
             ],
             path: "mdv",
             exclude: [
