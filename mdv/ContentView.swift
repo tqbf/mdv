@@ -23,7 +23,25 @@ struct ContentView: View {
     }
 
     @State private var selectedEntry: HistoryEntry?
-    @State private var rawMarkdown: String = ""
+
+    // Source of truth for the open document. `ParsedDocument` parses
+    // `blocks` and `tocHeadings` once on construction; `rawMarkdown`
+    // below is a thin getter/setter over `document.raw` so every
+    // existing call site keeps the same shape. Before this, `blocks`
+    // and `tocHeadings` were computed properties that re-split the
+    // entire raw string on every access — and `.modifier(BlockTextSelection(
+    // isHeading: isHeadingBlock(idx)))` per row meant a scroll tick did
+    // O(N) full re-parses, pegging the main thread on
+    // GraphHost.flushTransactions.
+    @State private var document: ParsedDocument = .empty
+    private var rawMarkdown: String {
+        get { document.raw }
+        nonmutating set {
+            if newValue != document.raw {
+                document = ParsedDocument(raw: newValue)
+            }
+        }
+    }
     @State private var sidebarWidth: CGFloat = 240
     @State private var dragHandleHovered = false
 
@@ -1372,54 +1390,7 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: task)
     }
 
-    private var blocks: [String] {
-        // Fence-aware split. A blank line ends a paragraph block normally,
-        // but blank lines INSIDE a fenced code block (``` or ~~~) are part
-        // of the code and must not split the block — otherwise multi-
-        // paragraph code samples get shredded into separate single-line
-        // code-blocks-or-prose, which mangles syntax highlighting.
-        var result: [String] = []
-        var current: [String] = []
-        var fenceMarker: String? = nil  // nil → outside, "```" or "~~~" → inside
-        let lines = rawMarkdown.components(separatedBy: "\n")
-
-        func flush() {
-            let joined = current.joined(separator: "\n")
-                .trimmingCharacters(in: .newlines)
-            if !joined.isEmpty { result.append(joined) }
-            current.removeAll(keepingCapacity: true)
-        }
-
-        for line in lines {
-            let trimmedStart = line.drop(while: { $0 == " " })
-            if let marker = fenceMarker {
-                current.append(line)
-                if trimmedStart.hasPrefix(marker) {
-                    fenceMarker = nil
-                }
-                continue
-            }
-            if trimmedStart.hasPrefix("```") {
-                if !current.isEmpty { flush() }
-                current.append(line)
-                fenceMarker = "```"
-                continue
-            }
-            if trimmedStart.hasPrefix("~~~") {
-                if !current.isEmpty { flush() }
-                current.append(line)
-                fenceMarker = "~~~"
-                continue
-            }
-            if line.trimmingCharacters(in: .whitespaces).isEmpty {
-                flush()
-            } else {
-                current.append(line)
-            }
-        }
-        flush()
-        return result
-    }
+    private var blocks: [String] { document.blocks }
 
     // MARK: - Section copy
 
@@ -1470,31 +1441,7 @@ struct ContentView: View {
 
     // MARK: - Table of Contents
 
-    private var tocHeadings: [TOCHeading] {
-        var result: [TOCHeading] = []
-        for (idx, block) in blocks.enumerated() {
-            let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
-            // Skip fenced code blocks even if they start with #
-            if trimmed.hasPrefix("```") { continue }
-            let level: Int
-            let prefix: String
-            if trimmed.hasPrefix("### ") {
-                level = 3; prefix = "### "
-            } else if trimmed.hasPrefix("## ") {
-                level = 2; prefix = "## "
-            } else if trimmed.hasPrefix("# ") {
-                level = 1; prefix = "# "
-            } else {
-                continue
-            }
-            // Single-line headings only
-            let firstLine = trimmed.components(separatedBy: "\n").first ?? trimmed
-            let raw = String(firstLine.dropFirst(prefix.count))
-            let text = stripInlineMarkdown(raw)
-            result.append(TOCHeading(level: level, text: text, blockIndex: idx))
-        }
-        return result
-    }
+    private var tocHeadings: [TOCHeading] { document.tocHeadings }
 
     /// `tocHeadings`, optionally narrowed to entries matching `tocSearchQuery`
     /// (case-/diacritic-insensitive substring on the heading text). Empty
@@ -1505,26 +1452,6 @@ struct ContentView: View {
         return tocHeadings.filter {
             $0.text.range(of: q, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }
-    }
-
-    private func stripInlineMarkdown(_ s: String) -> String {
-        var out = s
-        // Trailing #'s of ATX headings
-        out = out.replacingOccurrences(of: #"\s+#+\s*$"#, with: "", options: .regularExpression)
-        // Inline code / bold / italic markers
-        out = out.replacingOccurrences(of: "**", with: "")
-        out = out.replacingOccurrences(of: "__", with: "")
-        out = out.replacingOccurrences(of: "`", with: "")
-        // Bare * and _ around words (single-char emphasis)
-        out = out.replacingOccurrences(of: #"(?<!\\)\*"#, with: "", options: .regularExpression)
-        out = out.replacingOccurrences(of: #"(?<![A-Za-z0-9])_(?=[^_]+_)"#, with: "", options: .regularExpression)
-        // Markdown links [text](url) → text
-        out = out.replacingOccurrences(
-            of: #"\[([^\]]+)\]\([^)]+\)"#,
-            with: "$1",
-            options: .regularExpression
-        )
-        return out.trimmingCharacters(in: .whitespaces)
     }
 
     // MARK: - Right inspector (TOC + Bookmarks)
@@ -2827,6 +2754,136 @@ struct ContentView: View {
         }
         return true
     }
+}
+
+/// Parsed markdown document: raw text plus its derived `blocks` and
+/// `tocHeadings`, computed once at construction. `ContentView` holds one
+/// of these as `@State` and exposes `rawMarkdown` as a thin accessor over
+/// `document.raw`, so existing read/write sites are unchanged but each
+/// scroll tick reads `blocks`/`tocHeadings` in O(1) instead of re-splitting
+/// the whole raw string per visible row.
+fileprivate struct ParsedDocument: Equatable {
+    let raw: String
+    let blocks: [String]
+    let tocHeadings: [ContentView.TOCHeading]
+
+    static let empty = ParsedDocument(raw: "", blocks: [], tocHeadings: [])
+
+    private init(raw: String, blocks: [String], tocHeadings: [ContentView.TOCHeading]) {
+        self.raw = raw
+        self.blocks = blocks
+        self.tocHeadings = tocHeadings
+    }
+
+    init(raw: String) {
+        let blocks = Self.parseBlocks(raw)
+        self.init(
+            raw: raw,
+            blocks: blocks,
+            tocHeadings: Self.parseTOC(blocks: blocks)
+        )
+    }
+
+    // `blocks` and `tocHeadings` are pure functions of `raw`, so equality
+    // on `raw` alone is sufficient and avoids walking two arrays.
+    static func == (lhs: ParsedDocument, rhs: ParsedDocument) -> Bool {
+        lhs.raw == rhs.raw
+    }
+
+    private static func parseBlocks(_ raw: String) -> [String] {
+        // Fence-aware split. A blank line ends a paragraph block normally,
+        // but blank lines INSIDE a fenced code block (``` or ~~~) are part
+        // of the code and must not split the block — otherwise multi-
+        // paragraph code samples get shredded into separate single-line
+        // code-blocks-or-prose, which mangles syntax highlighting.
+        var result: [String] = []
+        var current: [String] = []
+        var fenceMarker: String? = nil  // nil → outside, "```" or "~~~" → inside
+        let lines = raw.components(separatedBy: "\n")
+
+        func flush() {
+            let joined = current.joined(separator: "\n")
+                .trimmingCharacters(in: .newlines)
+            if !joined.isEmpty { result.append(joined) }
+            current.removeAll(keepingCapacity: true)
+        }
+
+        for line in lines {
+            let trimmedStart = line.drop(while: { $0 == " " })
+            if let marker = fenceMarker {
+                current.append(line)
+                if trimmedStart.hasPrefix(marker) {
+                    fenceMarker = nil
+                }
+                continue
+            }
+            if trimmedStart.hasPrefix("```") {
+                if !current.isEmpty { flush() }
+                current.append(line)
+                fenceMarker = "```"
+                continue
+            }
+            if trimmedStart.hasPrefix("~~~") {
+                if !current.isEmpty { flush() }
+                current.append(line)
+                fenceMarker = "~~~"
+                continue
+            }
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                flush()
+            } else {
+                current.append(line)
+            }
+        }
+        flush()
+        return result
+    }
+
+    private static func parseTOC(blocks: [String]) -> [ContentView.TOCHeading] {
+        var result: [ContentView.TOCHeading] = []
+        for (idx, block) in blocks.enumerated() {
+            let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Skip fenced code blocks even if they start with #
+            if trimmed.hasPrefix("```") { continue }
+            let level: Int
+            let prefix: String
+            if trimmed.hasPrefix("### ") {
+                level = 3; prefix = "### "
+            } else if trimmed.hasPrefix("## ") {
+                level = 2; prefix = "## "
+            } else if trimmed.hasPrefix("# ") {
+                level = 1; prefix = "# "
+            } else {
+                continue
+            }
+            // Single-line headings only
+            let firstLine = trimmed.components(separatedBy: "\n").first ?? trimmed
+            let raw = String(firstLine.dropFirst(prefix.count))
+            let text = stripInlineMarkdown(raw)
+            result.append(ContentView.TOCHeading(level: level, text: text, blockIndex: idx))
+        }
+        return result
+    }
+}
+
+fileprivate func stripInlineMarkdown(_ s: String) -> String {
+    var out = s
+    // Trailing #'s of ATX headings
+    out = out.replacingOccurrences(of: #"\s+#+\s*$"#, with: "", options: .regularExpression)
+    // Inline code / bold / italic markers
+    out = out.replacingOccurrences(of: "**", with: "")
+    out = out.replacingOccurrences(of: "__", with: "")
+    out = out.replacingOccurrences(of: "`", with: "")
+    // Bare * and _ around words (single-char emphasis)
+    out = out.replacingOccurrences(of: #"(?<!\\)\*"#, with: "", options: .regularExpression)
+    out = out.replacingOccurrences(of: #"(?<![A-Za-z0-9])_(?=[^_]+_)"#, with: "", options: .regularExpression)
+    // Markdown links [text](url) → text
+    out = out.replacingOccurrences(
+        of: #"\[([^\]]+)\]\([^)]+\)"#,
+        with: "$1",
+        options: .regularExpression
+    )
+    return out.trimmingCharacters(in: .whitespaces)
 }
 
 /// Per-block text-selection gating. Prose blocks have `.enabled` so the
