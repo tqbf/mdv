@@ -103,11 +103,11 @@ struct MermaidCodeBlockChrome: View {
 
     private var styleMenu: some View {
         Menu {
-            styleChoices
+            stylePicker
         } label: {
             Image(systemName: "paintpalette")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(style == .document ? theme.secondaryText : theme.accent)
+                .foregroundStyle(style == .document ? theme.secondaryText : theme.accent)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
@@ -117,14 +117,14 @@ struct MermaidCodeBlockChrome: View {
         .help("Change Mermaid diagram style")
     }
 
-    @ViewBuilder
-    private var styleChoices: some View {
-        ForEach(MermaidRenderStyle.allCases) { candidate in
-            Toggle(candidate.displayName, isOn: Binding(
-                get: { style == candidate },
-                set: { picked in if picked { style = candidate } }
-            ))
+    private var stylePicker: some View {
+        Picker("Diagram style", selection: $style) {
+            ForEach(MermaidRenderStyle.allCases) { candidate in
+                Text(candidate.displayName).tag(candidate)
+            }
         }
+        .pickerStyle(.inline)
+        .labelsHidden()
     }
 
     @ViewBuilder
@@ -150,7 +150,7 @@ struct MermaidCodeBlockChrome: View {
             showSource.toggle()
         }
         Menu("Diagram Style") {
-            styleChoices
+            stylePicker
         }
         Button("Export Diagram as PNG") {
             MDVMermaidImage.exportPNG(source: content, theme: theme, style: style)
@@ -166,7 +166,7 @@ struct MermaidCodeBlockChrome: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(tinted ? theme.accent : theme.secondaryText)
+                .foregroundStyle(tinted ? theme.accent : theme.secondaryText)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
         }
@@ -208,28 +208,13 @@ struct MDVMermaidDiagramView: View {
     var body: some View {
         Group {
             if let image {
-                GeometryReader { proxy in
-                    ScrollView([.horizontal, .vertical], showsIndicators: zoom > 1.01) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFit()
-                            .frame(width: max(proxy.size.width - 36, 1) * zoom)
-                            .frame(minWidth: proxy.size.width, minHeight: proxy.size.height)
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 16)
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: diagramHeight(for: image))
-                .gesture(mermaidZoomGesture)
-                .accessibilityLabel("Mermaid diagram")
+                diagramBody(for: image)
             } else if failed {
                 MermaidFallbackView(source: source, theme: theme)
             } else {
                 ProgressView()
                     .controlSize(.small)
-                    .frame(maxWidth: .infinity, minHeight: 180)
+                    .frame(maxWidth: .infinity, minHeight: 60)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 16)
             }
@@ -247,6 +232,42 @@ struct MDVMermaidDiagramView: View {
         }
     }
 
+    @ViewBuilder
+    private func diagramBody(for image: NSImage) -> some View {
+        let aspect = image.size.width > 0 ? image.size.width / image.size.height : 1
+        let baseImage = Image(nsImage: image)
+            .resizable()
+            .interpolation(.high)
+            .aspectRatio(aspect, contentMode: .fit)
+
+        if zoom > 1.01 {
+            // Zoomed: inner ScrollView for panning. Pin the container height
+            // to the unzoomed fit height so the document doesn't reflow during pinch.
+            GeometryReader { proxy in
+                let fitWidth = max(proxy.size.width - 36, 1)
+                let fitHeight = fitWidth / aspect
+                ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                    baseImage
+                        .frame(width: fitWidth * zoom, height: fitHeight * zoom)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                }
+            }
+            .frame(height: 540)
+            .gesture(mermaidZoomGesture)
+            .accessibilityLabel("Mermaid diagram")
+        } else {
+            // Unzoomed: render inline at the container width × intrinsic aspect.
+            // No inner ScrollView, so wheel events bubble up to the document scroll.
+            baseImage
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+                .gesture(mermaidZoomGesture)
+                .accessibilityLabel("Mermaid diagram")
+        }
+    }
+
     private var mermaidZoomGesture: some Gesture {
         MagnificationGesture()
             .onChanged { value in
@@ -260,12 +281,6 @@ struct MDVMermaidDiagramView: View {
 
     private func clampedZoom(_ value: CGFloat) -> CGFloat {
         min(max(value, 0.5), 4)
-    }
-
-    private func diagramHeight(for image: NSImage) -> CGFloat {
-        guard image.size.width > 0 else { return 220 }
-        let aspectHeight = 720 * image.size.height / image.size.width
-        return min(max(aspectHeight * zoom + 32, 180), 720)
     }
 }
 
