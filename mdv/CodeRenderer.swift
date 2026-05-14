@@ -256,6 +256,10 @@ struct CodeBlockChrome: View {
         return shells.contains(displayLanguage)
     }
 
+    private var isMermaidLanguage: Bool {
+        displayLanguage == "mermaid"
+    }
+
     /// Heuristic: ≥ 50 % of non-empty lines start with `$ ` or `# `.
     /// Cheap to compute on every render — typical blocks are small.
     private var hasShellPrompts: Bool {
@@ -268,14 +272,23 @@ struct CodeBlockChrome: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            chromeRow
-            codeContent
+        if isMermaidLanguage {
+            MermaidCodeBlockChrome(
+                content: configuration.content,
+                displayLanguage: displayLanguage,
+                theme: theme,
+                palette: palette
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 0) {
+                chromeRow
+                codeContent
+            }
+            .background(palette.background ?? theme.secondaryBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .onHover { hovering = $0 }
+            .contextMenu { contextMenuItems }
         }
-        .background(palette.background ?? theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .onHover { hovering = $0 }
-        .contextMenu { contextMenuItems }
     }
 
     // MARK: Chrome row
