@@ -46,14 +46,37 @@ struct MermaidCodeBlockChrome: View {
 
     @State private var hovering = false
     @State private var showSource = false
+    @State private var wrap = false
     @State private var style: MermaidRenderStyle = .document
     @State private var copied = false
     @State private var copyGeneration = 0
 
     var body: some View {
+        if showSource {
+            sourceChrome
+        } else {
+            diagramChrome
+        }
+    }
+
+    // Diagram view: the diagram fills the box; the toolbar floats top-right
+    // as a translucent capsule, like Preview/Quick Look. Hover-revealed.
+    private var diagramChrome: some View {
+        MDVMermaidDiagramView(source: content, theme: theme, style: style)
+            .frame(maxWidth: .infinity)
+            .background(palette.background ?? theme.secondaryBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(alignment: .topTrailing) { floatingToolbar }
+            .onHover { hovering = $0 }
+            .contextMenu { contextMenuItems }
+    }
+
+    // Source view: matches the normal CodeBlockChrome look — language label
+    // top-left, hover-revealed toolbar top-right, syntax-highlighted content.
+    private var sourceChrome: some View {
         VStack(alignment: .leading, spacing: 0) {
-            chromeRow
-            contentView
+            sourceChromeRow
+            sourceContent
         }
         .background(palette.background ?? theme.secondaryBackground)
         .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -61,30 +84,67 @@ struct MermaidCodeBlockChrome: View {
         .contextMenu { contextMenuItems }
     }
 
-    private var chromeRow: some View {
+    private var floatingToolbar: some View {
+        HStack(spacing: 2) {
+            styleMenu
+
+            iconButton(
+                systemName: "curlybraces",
+                tinted: false,
+                help: "Show Mermaid source"
+            ) { showSource = true }
+
+            iconButton(
+                systemName: "square.and.arrow.down",
+                tinted: false,
+                help: "Export diagram as PNG"
+            ) { MDVMermaidImage.exportPNG(source: content, theme: theme, style: style) }
+
+            iconButton(
+                systemName: copied ? "checkmark" : "doc.on.doc",
+                tinted: copied,
+                help: copied ? "Copied" : "Copy code"
+            ) { copy() }
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(.thinMaterial)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(theme.secondaryText.opacity(0.18), lineWidth: 0.5)
+        }
+        .padding(.top, 8)
+        .padding(.trailing, 8)
+        .opacity(hovering ? 1 : 0)
+        .animation(.easeInOut(duration: 0.15), value: hovering)
+        .animation(.easeInOut(duration: 0.18), value: copied)
+    }
+
+    private var sourceChromeRow: some View {
         HStack(spacing: 0) {
             Text(displayLanguage)
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                .foregroundColor(theme.tertiaryText)
+                .foregroundStyle(theme.tertiaryText)
                 .opacity(displayLanguage.isEmpty ? 0 : 0.85)
                 .padding(.leading, 14)
 
             Spacer(minLength: 8)
 
             HStack(spacing: 2) {
-                styleMenu
+                iconButton(
+                    systemName: wrap ? "text.alignleft" : "text.append",
+                    tinted: wrap,
+                    help: wrap ? "Disable wrap" : "Wrap long lines"
+                ) { wrap.toggle() }
 
                 iconButton(
-                    systemName: showSource ? "point.3.connected.trianglepath.dotted" : "curlybraces",
-                    tinted: showSource,
-                    help: showSource ? "Show diagram" : "Show Mermaid source"
-                ) { showSource.toggle() }
-
-                iconButton(
-                    systemName: "square.and.arrow.down",
-                    tinted: false,
-                    help: "Export diagram as PNG"
-                ) { MDVMermaidImage.exportPNG(source: content, theme: theme, style: style) }
+                    systemName: "point.3.connected.trianglepath.dotted",
+                    tinted: true,
+                    help: "Show diagram"
+                ) { showSource = false }
 
                 iconButton(
                     systemName: copied ? "checkmark" : "doc.on.doc",
@@ -99,6 +159,25 @@ struct MermaidCodeBlockChrome: View {
         .padding(.top, 4)
         .animation(.easeInOut(duration: 0.12), value: hovering)
         .animation(.easeInOut(duration: 0.18), value: copied)
+        .animation(.easeInOut(duration: 0.18), value: wrap)
+    }
+
+    @ViewBuilder
+    private var sourceContent: some View {
+        let body = Text(CodeRenderer.shared.render(code: content, languageHint: "mermaid", theme: theme))
+            .fixedSize(horizontal: false, vertical: true)
+            .relativeLineSpacing(.em(0.225))
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .padding(.bottom, 14)
+
+        if wrap {
+            body.frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                body
+            }
+        }
     }
 
     private var styleMenu: some View {
@@ -128,32 +207,20 @@ struct MermaidCodeBlockChrome: View {
     }
 
     @ViewBuilder
-    private var contentView: some View {
-        if showSource {
-            Text(CodeRenderer.shared.render(code: content, languageHint: "mermaid", theme: theme))
-                .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.225))
-                .padding(.horizontal, 16)
-                .padding(.top, 4)
-                .padding(.bottom, 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            MDVMermaidDiagramView(source: content, theme: theme, style: style)
-                .frame(maxWidth: .infinity)
-        }
-    }
-
-    @ViewBuilder
     private var contextMenuItems: some View {
         Button("Copy Code") { copy() }
         Button(showSource ? "Show Diagram" : "Show Mermaid Source") {
             showSource.toggle()
         }
-        Menu("Diagram Style") {
-            stylePicker
-        }
-        Button("Export Diagram as PNG") {
-            MDVMermaidImage.exportPNG(source: content, theme: theme, style: style)
+        if showSource {
+            Button(wrap ? "Disable Wrap" : "Wrap Long Lines") { wrap.toggle() }
+        } else {
+            Menu("Diagram Style") {
+                stylePicker
+            }
+            Button("Export Diagram as PNG") {
+                MDVMermaidImage.exportPNG(source: content, theme: theme, style: style)
+            }
         }
     }
 
