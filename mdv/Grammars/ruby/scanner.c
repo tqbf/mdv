@@ -151,8 +151,10 @@ static inline void deserialize(Scanner *scanner, const char *buffer, unsigned le
 
         heredoc.word = (String)array_new();
         uint32_t word_length;
+        if (size + sizeof(uint32_t) > length) return;
         memcpy(&word_length, &buffer[size], sizeof(uint32_t));
         size += sizeof(uint32_t);
+        if (size + word_length > length) return;
         array_reserve(&heredoc.word, word_length);
         memcpy(heredoc.word.contents, &buffer[size], word_length);
         heredoc.word.size = word_length;
