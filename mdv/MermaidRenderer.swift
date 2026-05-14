@@ -47,7 +47,9 @@ struct MermaidCodeBlockChrome: View {
     @State private var hovering = false
     @State private var showSource = false
     @State private var wrap = false
-    @State private var style: MermaidRenderStyle = .document
+    // Style is a document-wide appearance choice, not a per-block preference:
+    // pick a palette once and every diagram updates and persists across launches.
+    @AppStorage("mdv.mermaid.style") private var style: MermaidRenderStyle = .document
     @State private var copied = false
     @State private var copyGeneration = 0
 
