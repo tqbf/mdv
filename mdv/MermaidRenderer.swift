@@ -260,13 +260,73 @@ struct MermaidCodeBlockChrome: View {
     }
 }
 
-private func isBeautifulMermaidSupported(_ source: String) -> Bool {
-    let first = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        .split(separator: "\n", maxSplits: 1).first.map(String.init)?.lowercased() ?? ""
-    for prefix in ["flowchart", "graph ", "sequencediagram", "classdiagram",
-                   "erdiagram", "xychart", "statediagram"] {
-        if first.hasPrefix(prefix) { return true }
+/// Returns the first line of `source` that is meaningful for diagram-type
+/// dispatch — i.e. not blank, not a `%%` comment, not a `%%{ init: … }%%`
+/// directive, and not inside a `--- … ---` frontmatter block. Lowercased.
+///
+/// Mermaid lets users put any combination of those preamble forms before
+/// the actual diagram keyword (`gantt`, `flowchart LR`, …); naively
+/// inspecting the first physical line therefore false-routes those
+/// diagrams into the WKWebView path even when BeautifulMermaid could
+/// render them natively.
+private func firstMermaidDirectiveLine(in source: String) -> String {
+    var inFrontmatter = false
+    var inDirective = false
+
+    for raw in source.split(separator: "\n", omittingEmptySubsequences: false) {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        if line.isEmpty { continue }
+
+        if inFrontmatter {
+            if line == "---" { inFrontmatter = false }
+            continue
+        }
+        if inDirective {
+            if line.contains("}%%") { inDirective = false }
+            continue
+        }
+
+        if line == "---" { inFrontmatter = true; continue }
+        if line.hasPrefix("%%{") {
+            // Single-line `%%{ init: … }%%` is consumed here; only flip the
+            // multi-line flag if the closer isn't on the same line.
+            if !line.contains("}%%") { inDirective = true }
+            continue
+        }
+        if line.hasPrefix("%%") { continue }
+
+        return line.lowercased()
     }
+    return ""
+}
+
+private func isBeautifulMermaidSupported(_ source: String) -> Bool {
+    let first = firstMermaidDirectiveLine(in: source)
+    if first.isEmpty { return false }
+
+    // Match the keyword exactly, or with any whitespace separator (spaces,
+    // tabs) before the diagram-specific arguments. Avoids the previous
+    // `"graph "` literal, which missed `graph\tLR` and bare `graph` on
+    // its own line, and avoids over-matching `graphfoo`.
+    func matches(_ keyword: String) -> Bool {
+        if first == keyword { return true }
+        guard first.hasPrefix(keyword) else { return false }
+        let next = first[first.index(first.startIndex, offsetBy: keyword.count)]
+        return next.isWhitespace
+    }
+
+    // BeautifulMermaid covers exactly these six families. `statediagram`
+    // matches both `stateDiagram` and `stateDiagram-v2`; same idea for
+    // `xychart` covering `xychart-beta`. `flowchart-elk` is intentionally
+    // *not* matched — ELK is a different layout backend that
+    // BeautifulMermaid doesn't speak.
+    if matches("flowchart") { return true }
+    if matches("graph") { return true }
+    if matches("sequencediagram") { return true }
+    if matches("classdiagram") { return true }
+    if matches("erdiagram") { return true }
+    if first.hasPrefix("statediagram") { return true } // statediagram-v2
+    if first.hasPrefix("xychart") { return true }      // xychart-beta
     return false
 }
 
