@@ -53,10 +53,20 @@ func smartenMarkdown(_ source: String) -> String {
     // URL containing `(` like `https://en.wikipedia.org/wiki/Foo_(disambig)`
     // doesn't close early.
     var linkParenDepth = 0
-    var atLineStart = true
 
     while i < source.endIndex {
         let c = source[i]
+        // We are at the start of a logical line iff the last character we
+        // emitted was a newline (or nothing has been emitted yet). This is
+        // derived from `result` instead of tracked in a flag: every
+        // early-`continue` branch below would otherwise have to remember to
+        // clear the flag, and a single missed one lets the thematic-break
+        // look-ahead re-fire *mid*-line. On a long `-` run that is fatal —
+        // the em-dash branch advances by 3 but never reset the flag, so the
+        // look-ahead re-scanned the shrinking tail on every step: O(n^2)
+        // time and allocation, a hang on a crafted file. `result.last` is
+        // O(1), so this stays linear.
+        let atLineStart = result.isEmpty || result.last == "\n"
 
         // ---- Thematic break line (setext heading underline or standalone HR) ----
         // Emit verbatim so MarkdownUI can recognize it as a thematic break.
@@ -65,10 +75,9 @@ func smartenMarkdown(_ source: String) -> String {
             while end < source.endIndex && source[end] != "\n" {
                 end = source.index(after: end)
             }
-            if looksLikeThematicBreakLine(String(source[i..<end])) {
+            if looksLikeThematicBreakLine(source[i..<end]) {
                 result.append(contentsOf: source[i..<end])
                 i = end
-                atLineStart = false
                 continue
             }
         }
@@ -93,7 +102,6 @@ func smartenMarkdown(_ source: String) -> String {
         }
 
         if codeRun > 0 {
-            atLineStart = (c == "\n")
             result.append(c)
             i = source.index(after: i)
             continue
@@ -111,7 +119,6 @@ func smartenMarkdown(_ source: String) -> String {
             continue
         }
         if linkParenDepth > 0 {
-            atLineStart = (c == "\n")
             result.append(c)
             if c == "(" { linkParenDepth += 1 }
             else if c == ")" {
@@ -208,7 +215,6 @@ func smartenMarkdown(_ source: String) -> String {
             continue
         }
 
-        atLineStart = (c == "\n")
         result.append(c)
         i = source.index(after: i)
     }
@@ -219,7 +225,7 @@ func smartenMarkdown(_ source: String) -> String {
 /// True if `line` (one logical line, no `\n`) is a CommonMark thematic break:
 /// 3+ occurrences of the same marker (`-`, `*`, or `_`), with optional spaces/tabs,
 /// and nothing else. Examples: `---`, `----`, `* * *`, `- - -`.
-private func looksLikeThematicBreakLine(_ line: String) -> Bool {
+private func looksLikeThematicBreakLine(_ line: some StringProtocol) -> Bool {
     for marker: Character in ["-", "*", "_"] {
         let onlyMarkerAndSpace = line.allSatisfy { $0 == marker || $0 == " " || $0 == "\t" }
         if onlyMarkerAndSpace && line.filter({ $0 == marker }).count >= 3 {
