@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import WebKit
 
@@ -36,13 +37,29 @@ struct MermaidWebView: NSViewRepresentable {
         return js
     }()
 
+    /// Render a SwiftUI `Color` as a CSS `rgb(...)` literal in sRGB so the
+    /// HTML body can be painted to match the surrounding chrome without a
+    /// transparent WebView. Falls back to `transparent` if the conversion
+    /// can't be done (which collapses to the WebView's default background
+    /// — uglier but never crashes the build).
+    static func cssColor(_ color: Color) -> String {
+        guard let ns = NSColor(color).usingColorSpace(.sRGB) else { return "transparent" }
+        let r = Int((ns.redComponent * 255).rounded())
+        let g = Int((ns.greenComponent * 255).rounded())
+        let b = Int((ns.blueComponent * 255).rounded())
+        return "rgb(\(r),\(g),\(b))"
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(height: $height, failed: $failed) }
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.userContentController.add(context.coordinator, name: "mermaidHeight")
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.setValue(false, forKey: "drawsBackground")
+        // We used to KVC `drawsBackground = false` here so the chrome's
+        // themed background showed through, but that's a private-API hack.
+        // Instead, paint the same color from inside the HTML body — see
+        // `buildHTML` — and let the WebView stay opaque.
         return webView
     }
 
@@ -60,16 +77,22 @@ struct MermaidWebView: NSViewRepresentable {
         // so clear the flag before the new render reports back.
         DispatchQueue.main.async { self.failed = false }
 
-        let html = buildHTML(source: source, isDark: theme.isDark)
+        let html = buildHTML(source: source, theme: theme)
         webView.loadHTMLString(html, baseURL: nil)
     }
 
-    private func buildHTML(source: String, isDark: Bool) -> String {
-        let mermaidTheme = isDark ? "dark" : "default"
+    private func buildHTML(source: String, theme: MDVTheme) -> String {
+        let mermaidTheme = theme.isDark ? "dark" : "default"
         let escaped = source
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+        // Match the chrome background painted by `MermaidCodeBlockChrome`
+        // (theme.secondaryBackground). The WebView itself is opaque now,
+        // so without this the diagram zone would show whatever the system
+        // default WebView background is and clash with the surrounding
+        // chrome on every dark-and-not-quite-black theme.
+        let bgCSS = Self.cssColor(theme.secondaryBackground)
         return """
         <!DOCTYPE html>
         <html>
@@ -77,7 +100,7 @@ struct MermaidWebView: NSViewRepresentable {
         <meta charset="UTF-8">
         <style>
           * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { background: transparent; }
+          html, body { background: \(bgCSS); }
           .mermaid { padding: 12px 18px; }
           .mermaid svg { max-width: 100%; height: auto; display: block; }
         </style>
