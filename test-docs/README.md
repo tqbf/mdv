@@ -28,6 +28,11 @@ history sidebar with the rest.
 - [toc-stress.md](toc-stress.md) — many headings at every level so
   you can exercise the TOC pane, the spyglass-collapse search, and
   the "On this page" affordances.
+- [thematic-break.md](thematic-break.md) — every CommonMark
+  thematic-break variant (`---`, `----`, `* * *`, `_ _ _`, `- - -`,
+  setext H2) plus inline dash sequences that must *not* become rules.
+  Useful for verifying thematic-break rendering with View → Smart
+  Typography on and off.
 
 ## Quick checklist
 
