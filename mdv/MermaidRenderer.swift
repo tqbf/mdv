@@ -455,7 +455,7 @@ enum MDVMermaidImage {
     }
 }
 
-private struct MermaidFallbackView: View {
+struct MermaidFallbackView: View {
     let source: String
     let theme: MDVTheme
 
