@@ -33,6 +33,10 @@ history sidebar with the rest.
   setext H2) plus inline dash sequences that must *not* become rules.
   Useful for verifying thematic-break rendering with View → Smart
   Typography on and off.
+- [gantt.md](gantt.md) — a Mermaid `gantt` diagram. Rendered via
+  WKWebView + bundled mermaid.js (BeautifulMermaid does not support
+  this type). Use it to verify fallback rendering, light/dark theme
+  switching, and the source-view toggle.
 
 ## Quick checklist
 

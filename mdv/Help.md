@@ -38,6 +38,17 @@ Every program eventually evolves bookmarks. We did not fight it.
 
 A frustrated, untalented graphic designer (the author) could not resist letting two LLMs argue with him about typography. The result is several themes. Pick one from the toolbar. Do not @ me about font choices.
 
+## Mermaid diagrams
+
+Fenced code blocks marked ` ```mermaid ` are rendered as diagrams, not source.
+
+- **Style picker** (palette icon, top-right of each diagram) — choose between Document (follows your current theme), Light, Dark, Tokyo Night, and Catppuccin. The choice is global and persists across restarts.
+- **Source toggle** (curly braces icon) — flip between the rendered diagram and the raw Mermaid source. The source view gets the same syntax highlighting as any other code block.
+- **Export** (download icon) — save the diagram as a PNG.
+- **Zoom** — pinch to zoom in on any diagram. Scroll to pan when zoomed.
+
+Flowcharts, sequence diagrams, class diagrams, ER diagrams, state diagrams, and XY charts render natively. Gantt charts and other diagram types render via a bundled mermaid.js — same toolbar, slightly slower first load.
+
 ## Editor integration
 
 - **⌘E** — open the current file in your external editor.
