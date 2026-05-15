@@ -10,12 +10,22 @@ struct MermaidWebViewContainer: View {
     @State private var failed = false
 
     var body: some View {
-        if failed {
-            MermaidFallbackView(source: source, theme: theme)
-        } else {
-            MermaidWebView(source: source, theme: theme, height: $height, failed: $failed)
-                .frame(height: max(height, 60))
+        Group {
+            if failed {
+                MermaidFallbackView(source: source, theme: theme)
+            } else {
+                MermaidWebView(source: source, theme: theme, height: $height, failed: $failed)
+                    .frame(height: max(height, 60))
+            }
         }
+        // Match the native renderer's accessibility surface
+        // (`MDVMermaidDiagramView.diagramBody` exposes the same label).
+        // The embedded WebView's own AX tree is opaque to VoiceOver, so
+        // collapsing this subtree to a single labeled element is more
+        // useful than leaking whatever the WebView happens to expose.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Mermaid diagram")
+        .accessibilityHint("Use Show Mermaid Source to view the diagram code.")
     }
 }
 
