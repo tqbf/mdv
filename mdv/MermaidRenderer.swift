@@ -53,6 +53,12 @@ struct MermaidCodeBlockChrome: View {
     @State private var copied = false
     @State private var copyGeneration = 0
 
+    // The style picker only drives BeautifulMermaid's palette; the WKWebView
+    // fallback for gantt/pie/etc. honours just light/dark via mermaid.js's
+    // own theme. Showing the menu for those diagrams would mislead users
+    // into thinking it does something it can't.
+    private var nativeRenderer: Bool { isBeautifulMermaidSupported(content) }
+
     var body: some View {
         if showSource {
             sourceChrome
@@ -88,7 +94,7 @@ struct MermaidCodeBlockChrome: View {
 
     private var floatingToolbar: some View {
         HStack(spacing: 2) {
-            styleMenu
+            if nativeRenderer { styleMenu }
 
             iconButton(
                 systemName: "curlybraces",
@@ -217,8 +223,10 @@ struct MermaidCodeBlockChrome: View {
         if showSource {
             Button(wrap ? "Disable Wrap" : "Wrap Long Lines") { wrap.toggle() }
         } else {
-            Menu("Diagram Style") {
-                stylePicker
+            if nativeRenderer {
+                Menu("Diagram Style") {
+                    stylePicker
+                }
             }
             Button("Export Diagram as PNG") {
                 MDVMermaidImage.exportPNG(source: content, theme: theme, style: style)
