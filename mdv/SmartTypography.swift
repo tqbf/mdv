@@ -36,6 +36,11 @@ func smartenMarkdown(_ source: String) -> String {
         return source
     }
 
+    // Thematic break: entire block is a horizontal-rule line (--- / ---- / * * * / etc.)
+    if looksLikeThematicBreakLine(trimmed) {
+        return source
+    }
+
     var result = ""
     result.reserveCapacity(source.count)
 
@@ -48,9 +53,25 @@ func smartenMarkdown(_ source: String) -> String {
     // URL containing `(` like `https://en.wikipedia.org/wiki/Foo_(disambig)`
     // doesn't close early.
     var linkParenDepth = 0
+    var atLineStart = true
 
     while i < source.endIndex {
         let c = source[i]
+
+        // ---- Thematic break line (setext heading underline or standalone HR) ----
+        // Emit verbatim so MarkdownUI can recognize it as a thematic break.
+        if atLineStart && (c == "-" || c == "*" || c == "_") && codeRun == 0 {
+            var end = i
+            while end < source.endIndex && source[end] != "\n" {
+                end = source.index(after: end)
+            }
+            if looksLikeThematicBreakLine(String(source[i..<end])) {
+                result.append(contentsOf: source[i..<end])
+                i = end
+                atLineStart = false
+                continue
+            }
+        }
 
         // ---- Backtick runs (inline code spans) ----
         if c == "`" {
@@ -72,6 +93,7 @@ func smartenMarkdown(_ source: String) -> String {
         }
 
         if codeRun > 0 {
+            atLineStart = (c == "\n")
             result.append(c)
             i = source.index(after: i)
             continue
@@ -89,6 +111,7 @@ func smartenMarkdown(_ source: String) -> String {
             continue
         }
         if linkParenDepth > 0 {
+            atLineStart = (c == "\n")
             result.append(c)
             if c == "(" { linkParenDepth += 1 }
             else if c == ")" {
@@ -185,11 +208,25 @@ func smartenMarkdown(_ source: String) -> String {
             continue
         }
 
+        atLineStart = (c == "\n")
         result.append(c)
         i = source.index(after: i)
     }
 
     return result
+}
+
+/// True if `line` (one logical line, no `\n`) is a CommonMark thematic break:
+/// 3+ occurrences of the same marker (`-`, `*`, or `_`), with optional spaces/tabs,
+/// and nothing else. Examples: `---`, `----`, `* * *`, `- - -`.
+private func looksLikeThematicBreakLine(_ line: String) -> Bool {
+    for marker: Character in ["-", "*", "_"] {
+        let onlyMarkerAndSpace = line.allSatisfy { $0 == marker || $0 == " " || $0 == "\t" }
+        if onlyMarkerAndSpace && line.filter({ $0 == marker }).count >= 3 {
+            return true
+        }
+    }
+    return false
 }
 
 /// True iff the block contains a GFM table separator row — a line whose
