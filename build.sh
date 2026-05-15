@@ -39,6 +39,7 @@ chmod +x                         "$APP/Contents/Resources/mdv"
 # Bundle the in-app help doc; HelpManager copies it out to a stable path
 # under ~/Library/Application Support/mdv on demand so bookmarks survive.
 cp mdv/Help.md                   "$APP/Contents/Resources/Help.md"
+cp mdv/mermaid.min.js            "$APP/Contents/Resources/"
 
 echo "→ codesigning (adhoc)"
 codesign --force --sign - --entitlements mdv/mdv.entitlements "$APP"

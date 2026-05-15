@@ -260,6 +260,16 @@ struct MermaidCodeBlockChrome: View {
     }
 }
 
+private func isBeautifulMermaidSupported(_ source: String) -> Bool {
+    let first = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        .split(separator: "\n", maxSplits: 1).first.map(String.init)?.lowercased() ?? ""
+    for prefix in ["flowchart", "graph ", "sequencediagram", "classdiagram",
+                   "erdiagram", "xychart", "statediagram"] {
+        if first.hasPrefix(prefix) { return true }
+    }
+    return false
+}
+
 struct MDVMermaidDiagramView: View {
     let source: String
     let theme: MDVTheme
@@ -275,29 +285,33 @@ struct MDVMermaidDiagramView: View {
     }
 
     var body: some View {
-        Group {
-            if let image {
-                diagramBody(for: image)
-            } else if failed {
-                MermaidFallbackView(source: source, theme: theme)
-            } else {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity, minHeight: 60)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 16)
+        if isBeautifulMermaidSupported(source) {
+            Group {
+                if let image {
+                    diagramBody(for: image)
+                } else if failed {
+                    MermaidFallbackView(source: source, theme: theme)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, minHeight: 60)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 16)
+                }
             }
-        }
-        .task(id: renderKey) {
-            failed = false
-            image = nil
-            zoom = 1
-            committedZoom = 1
-            if let rendered = await MDVMermaidImageCache.shared.image(source: source, theme: theme, style: style, key: renderKey) {
-                if !Task.isCancelled { image = rendered }
-            } else if !Task.isCancelled {
-                failed = true
+            .task(id: renderKey) {
+                failed = false
+                image = nil
+                zoom = 1
+                committedZoom = 1
+                if let rendered = await MDVMermaidImageCache.shared.image(source: source, theme: theme, style: style, key: renderKey) {
+                    if !Task.isCancelled { image = rendered }
+                } else if !Task.isCancelled {
+                    failed = true
+                }
             }
+        } else {
+            MermaidWebViewContainer(source: source, theme: theme)
         }
     }
 
