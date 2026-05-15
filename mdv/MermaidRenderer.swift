@@ -102,11 +102,13 @@ struct MermaidCodeBlockChrome: View {
                 help: "Show Mermaid source"
             ) { showSource = true }
 
-            iconButton(
-                systemName: "square.and.arrow.down",
-                tinted: false,
-                help: "Export diagram as PNG"
-            ) { MDVMermaidImage.exportPNG(source: content, theme: theme, style: style) }
+            if nativeRenderer {
+                iconButton(
+                    systemName: "square.and.arrow.down",
+                    tinted: false,
+                    help: "Export diagram as PNG"
+                ) { MDVMermaidImage.exportPNG(source: content, theme: theme, style: style) }
+            }
 
             iconButton(
                 systemName: copied ? "checkmark" : "doc.on.doc",
@@ -227,9 +229,9 @@ struct MermaidCodeBlockChrome: View {
                 Menu("Diagram Style") {
                     stylePicker
                 }
-            }
-            Button("Export Diagram as PNG") {
-                MDVMermaidImage.exportPNG(source: content, theme: theme, style: style)
+                Button("Export Diagram as PNG") {
+                    MDVMermaidImage.exportPNG(source: content, theme: theme, style: style)
+                }
             }
         }
     }
