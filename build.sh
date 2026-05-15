@@ -40,13 +40,33 @@ chmod +x                         "$APP/Contents/Resources/mdv"
 # under ~/Library/Application Support/mdv on demand so bookmarks survive.
 cp mdv/Help.md                   "$APP/Contents/Resources/Help.md"
 # Download mermaid.min.js on demand so it stays out of git but CI can build.
+# We pin the version *and* the SHA256 of the published artifact so the
+# bundled JS is the exact bytes we reviewed — anything else (jsDelivr
+# regression, stale local copy, deliberate tampering) hard-fails the build.
 MERMAID_VERSION="11.4.1"
+MERMAID_SHA256="a43bc1afd446f9c4cc66ac5dd45d02e8d65e26fc5344ec0ef787f88d6ddb6f9e"
 MERMAID_JS="mdv/mermaid.min.js"
+
+verify_mermaid() {
+    local actual
+    actual="$(shasum -a 256 "$MERMAID_JS" | awk '{print $1}')"
+    if [ "$actual" != "$MERMAID_SHA256" ]; then
+        echo "✗ mermaid.min.js sha256 mismatch"
+        echo "  expected: $MERMAID_SHA256"
+        echo "  actual:   $actual"
+        echo "  delete $MERMAID_JS and re-run, or update MERMAID_SHA256 if"
+        echo "  you intentionally bumped MERMAID_VERSION."
+        exit 1
+    fi
+}
+
 if [ ! -f "$MERMAID_JS" ]; then
     echo "→ downloading mermaid.js $MERMAID_VERSION"
     curl -fsSL "https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js" \
-         -o "$MERMAID_JS"
+         -o "$MERMAID_JS.tmp"
+    mv "$MERMAID_JS.tmp" "$MERMAID_JS"
 fi
+verify_mermaid
 cp "$MERMAID_JS"                 "$APP/Contents/Resources/"
 
 echo "→ codesigning (adhoc)"
