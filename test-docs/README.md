@@ -37,6 +37,13 @@ history sidebar with the rest.
   WKWebView + bundled mermaid.js (BeautifulMermaid does not support
   this type). Use it to verify fallback rendering, light/dark theme
   switching, and the source-view toggle.
+- [mermaid-web-fallback.md](mermaid-web-fallback.md) — one of every
+  other diagram type that goes through the WKWebView fallback (pie,
+  timeline, mindmap, journey, quadrant chart, requirement diagram)
+  plus a flowchart with a `%%{init}%%` directive and a `%%` comment
+  before the keyword to verify the native dispatcher still finds
+  it. If anything in here renders as the "could not be rendered"
+  plate, the type-detector is at fault.
 
 ## Quick checklist
 
