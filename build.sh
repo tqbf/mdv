@@ -39,7 +39,15 @@ chmod +x                         "$APP/Contents/Resources/mdv"
 # Bundle the in-app help doc; HelpManager copies it out to a stable path
 # under ~/Library/Application Support/mdv on demand so bookmarks survive.
 cp mdv/Help.md                   "$APP/Contents/Resources/Help.md"
-cp mdv/mermaid.min.js            "$APP/Contents/Resources/"
+# Download mermaid.min.js on demand so it stays out of git but CI can build.
+MERMAID_VERSION="11.4.1"
+MERMAID_JS="mdv/mermaid.min.js"
+if [ ! -f "$MERMAID_JS" ]; then
+    echo "→ downloading mermaid.js $MERMAID_VERSION"
+    curl -fsSL "https://cdn.jsdelivr.net/npm/mermaid@${MERMAID_VERSION}/dist/mermaid.min.js" \
+         -o "$MERMAID_JS"
+fi
+cp "$MERMAID_JS"                 "$APP/Contents/Resources/"
 
 echo "→ codesigning (adhoc)"
 codesign --force --sign - --entitlements mdv/mdv.entitlements "$APP"
