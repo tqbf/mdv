@@ -6,7 +6,12 @@ struct MermaidWebViewContainer: View {
     let source: String
     let theme: MDVTheme
 
-    @State private var height: CGFloat = 300
+    // Start small + show a spinner instead of holding a 300pt placeholder
+    // open until the first measurement arrives. The document then reflows
+    // exactly once — when mermaid actually reports the rendered SVG height
+    // — rather than jumping from 300 to the real value mid-scroll.
+    @State private var height: CGFloat = 60
+    @State private var measured = false
     @State private var failed = false
 
     var body: some View {
@@ -14,8 +19,15 @@ struct MermaidWebViewContainer: View {
             if failed {
                 MermaidFallbackView(source: source, theme: theme)
             } else {
-                MermaidWebView(source: source, theme: theme, height: $height, failed: $failed)
+                MermaidWebView(source: source, theme: theme,
+                               height: $height, measured: $measured, failed: $failed)
                     .frame(height: max(height, 60))
+                    .overlay {
+                        if !measured {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
             }
         }
         // Match the native renderer's accessibility surface
@@ -33,6 +45,7 @@ struct MermaidWebView: NSViewRepresentable {
     let source: String
     let theme: MDVTheme
     @Binding var height: CGFloat
+    @Binding var measured: Bool
     @Binding var failed: Bool
 
     struct LoadKey: Equatable {
@@ -60,7 +73,9 @@ struct MermaidWebView: NSViewRepresentable {
         return "rgb(\(r),\(g),\(b))"
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(height: $height, failed: $failed) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(height: $height, measured: $measured, failed: $failed)
+    }
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -154,12 +169,14 @@ struct MermaidWebView: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler {
         @Binding var height: CGFloat
+        @Binding var measured: Bool
         @Binding var failed: Bool
         var lastLoadKey: LoadKey?
         var lastMeasuredHeight: CGFloat?
 
-        init(height: Binding<CGFloat>, failed: Binding<Bool>) {
+        init(height: Binding<CGFloat>, measured: Binding<Bool>, failed: Binding<Bool>) {
             _height = height
+            _measured = measured
             _failed = failed
         }
 
@@ -184,7 +201,14 @@ struct MermaidWebView: NSViewRepresentable {
             // catches reloads, but suppressing micro-deltas keeps things calm.
             if let last = lastMeasuredHeight, abs(last - newHeight) < 0.5 { return }
             lastMeasuredHeight = newHeight
-            DispatchQueue.main.async { self.height = newHeight }
+            DispatchQueue.main.async {
+                self.height = newHeight
+                // First successful measurement: drop the ProgressView overlay.
+                // We never flip back to false on subsequent reloads (theme
+                // change, etc.) so the existing render stays on screen until
+                // the new one settles, instead of flashing a spinner.
+                if !self.measured { self.measured = true }
+            }
         }
     }
 }
