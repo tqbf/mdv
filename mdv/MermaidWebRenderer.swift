@@ -88,6 +88,16 @@ struct MermaidWebView: NSViewRepresentable {
         return webView
     }
 
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        // `WKUserContentController.add(_:name:)` retains the script-message
+        // handler. SwiftUI tears the representable down when the diagram
+        // scrolls out of identity, but the configuration's userContentController
+        // would keep the coordinator alive (with its bindings) until the
+        // WebView itself is collected. Explicit removal here keeps lifecycle
+        // honest and is the documented Apple pattern.
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "mermaidHeight")
+    }
+
     func updateNSView(_ webView: WKWebView, context: Context) {
         // Reload only when source/theme actually change. Without this guard,
         // every SwiftUI update (including the height write we trigger from JS)
@@ -134,7 +144,15 @@ struct MermaidWebView: NSViewRepresentable {
         <div class="mermaid">\(escaped)</div>
         <script>\(Self.mermaidJS)</script>
         <script>
-          mermaid.initialize({ startOnLoad: false, theme: '\(mermaidTheme)' });
+          // `securityLevel: 'strict'` is the mermaid.js default in v11, but
+          // pinning it here means the bundled JS can ship with whatever
+          // default it likes in the future without quietly downgrading the
+          // sandbox around user-supplied diagram source.
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: '\(mermaidTheme)',
+            securityLevel: 'strict'
+          });
           mermaid.run().then(function() {
             var svg = document.querySelector('.mermaid svg');
             if (!svg) {
