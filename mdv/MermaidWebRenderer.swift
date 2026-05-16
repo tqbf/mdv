@@ -122,11 +122,26 @@ struct MermaidWebView: NSViewRepresentable {
           mermaid.initialize({ startOnLoad: false, theme: '\(mermaidTheme)' });
           mermaid.run().then(function() {
             var svg = document.querySelector('.mermaid svg');
-            if (svg) {
+            if (!svg) {
+              window.webkit.messageHandlers.mermaidHeight.postMessage({ ok: false, error: 'no SVG produced' });
+              return;
+            }
+            function report() {
               var h = svg.getBoundingClientRect().height + 24;
               window.webkit.messageHandlers.mermaidHeight.postMessage({ ok: true, height: h });
-            } else {
-              window.webkit.messageHandlers.mermaidHeight.postMessage({ ok: false, error: 'no SVG produced' });
+            }
+            // Some diagram types (journey, quadrantChart, requirementDiagram)
+            // finalize their SVG dimensions *after* the run() promise resolves.
+            // A bare `getBoundingClientRect()` here returns a stale ~60pt
+            // height; waiting two animation frames lets the browser complete
+            // its first paint, and a ResizeObserver catches any further
+            // adjustments. The Swift side filters sub-pixel noise so the
+            // tail of ResizeObserver callbacks doesn't churn @State.
+            requestAnimationFrame(function() {
+              requestAnimationFrame(report);
+            });
+            if (typeof ResizeObserver !== 'undefined') {
+              new ResizeObserver(report).observe(svg);
             }
           }).catch(function(err) {
             window.webkit.messageHandlers.mermaidHeight.postMessage({ ok: false, error: String(err) });
