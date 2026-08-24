@@ -80,6 +80,12 @@ struct ContentView: View {
     /// placeholder in the rendered document.
     @AppStorage("mdv_load_remote_images") private var loadRemoteImages: Bool = false
 
+    /// Whether a document's metadata header is drawn. Default on. Purely a
+    /// display choice: the header stays block 0 either way, so block
+    /// indices, bookmarks and find all behave the same whichever way this
+    /// sits. Toggle via View → Show Frontmatter.
+    @AppStorage("mdv_show_frontmatter") private var showFrontmatter: Bool = true
+
     /// Watches the currently-loaded file so external-editor saves push
     /// fresh content into the viewer automatically.
     @State private var fileWatcher = FileWatcher()
@@ -1392,6 +1398,10 @@ struct ContentView: View {
 
     private var blocks: [String] { document.blocks }
 
+    /// Rows of the document's metadata header, when it has one. Non-nil
+    /// means `blocks[0]` is that header.
+    private var frontmatter: [FrontmatterRow]? { document.frontmatter }
+
     // MARK: - Section copy
 
     /// True if the block at `idx` is an ATX heading (`#`, `##`, `###`).
@@ -2018,8 +2028,9 @@ struct ContentView: View {
     /// inline (paragraph / heading / list / blockquote — i.e. not code or
     /// table), swap MarkdownUI for an AttributedString-based Text so we
     /// can paint a yellow highlight on the matched substrings themselves.
-    /// Other blocks keep MarkdownUI's full rendering and rely on the
-    /// block-level tint for find feedback.
+    /// Other blocks keep MarkdownUI's full rendering — bar a metadata
+    /// header, which gets its own table — and rely on the block-level
+    /// tint for find feedback.
     @ViewBuilder
     private func blockView(block: String, idx: Int) -> some View {
         if shouldInlineHighlight(block: block, idx: idx) {
@@ -2030,6 +2041,22 @@ struct ContentView: View {
             // blocks; everything else still gets smart typography.
             Text(highlightedAttributedString(for: block, idx: idx))
                 .frame(maxWidth: .infinity, alignment: .leading)
+        } else if idx == 0, let rows = frontmatter {
+            // Metadata, not prose: a properties table rather than markdown.
+            // Ordered after the find branch on purpose — while find is
+            // active the header shows its source text with the matches
+            // highlighted, same as every other block. That ordering is also
+            // what reveals a header hidden below: a match inside it stays
+            // reachable and visible for as long as find is running, the way
+            // an editor shows hits inside a folded region, so find never
+            // sends the reader to a block that draws nothing.
+            if showFrontmatter {
+                FrontmatterTableView(
+                    rows: rows,
+                    theme: themes.current,
+                    fontScale: themes.fontScale
+                )
+            }
         } else {
             Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
                 .markdownTheme(themes.current.markdownTheme(scale: themes.fontScale))
@@ -2766,26 +2793,46 @@ fileprivate struct ParsedDocument: Equatable {
     let raw: String
     let blocks: [String]
     let tocHeadings: [ContentView.TOCHeading]
+    /// Display rows for `blocks[0]` when it is a metadata header, nil when
+    /// the document has none. Frontmatter is always block 0 by construction,
+    /// so callers never have to re-detect it — and parsing it here, once per
+    /// document, keeps it out of the per-render path like the rest.
+    let frontmatter: [FrontmatterRow]?
 
-    static let empty = ParsedDocument(raw: "", blocks: [], tocHeadings: [])
+    var hasFrontmatter: Bool { frontmatter != nil }
 
-    private init(raw: String, blocks: [String], tocHeadings: [ContentView.TOCHeading]) {
+    static let empty = ParsedDocument(raw: "", blocks: [], tocHeadings: [], frontmatter: nil)
+
+    private init(
+        raw: String,
+        blocks: [String],
+        tocHeadings: [ContentView.TOCHeading],
+        frontmatter: [FrontmatterRow]?
+    ) {
         self.raw = raw
         self.blocks = blocks
         self.tocHeadings = tocHeadings
+        self.frontmatter = frontmatter
     }
 
     init(raw: String) {
-        let blocks = Self.parseBlocks(raw)
+        // A metadata header is lifted out before the blank-line split so it
+        // stays one block even when it contains blank lines of its own; the
+        // body after the closing fence splits exactly as any document does.
+        let span = frontmatterSpan(in: raw)
+        let blocks = span.map { [$0.block] + Self.parseBlocks(String(raw[$0.bodyStart...])) }
+            ?? Self.parseBlocks(raw)
         self.init(
             raw: raw,
             blocks: blocks,
-            tocHeadings: Self.parseTOC(blocks: blocks)
+            tocHeadings: Self.parseTOC(blocks: blocks),
+            frontmatter: span.map { frontmatterRows($0.block) }
         )
     }
 
-    // `blocks` and `tocHeadings` are pure functions of `raw`, so equality
-    // on `raw` alone is sufficient and avoids walking two arrays.
+    // `blocks`, `tocHeadings` and `frontmatter` are pure functions of
+    // `raw`, so equality on `raw` alone is sufficient and avoids walking
+    // two arrays.
     static func == (lhs: ParsedDocument, rhs: ParsedDocument) -> Bool {
         lhs.raw == rhs.raw
     }

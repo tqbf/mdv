@@ -33,6 +33,15 @@ history sidebar with the rest.
   setext H2) plus inline dash sequences that must *not* become rules.
   Useful for verifying thematic-break rendering with View → Smart
   Typography on and off.
+- [frontmatter.md](frontmatter.md) — a YAML metadata header at the top
+  of a file, with the folded scalars, sequences, and nested mappings
+  real headers use. Three companions cover the rest of the family:
+  [frontmatter-ellipsis-close.md](frontmatter-ellipsis-close.md) (`...`
+  closer, blank line inside the header),
+  [frontmatter-toml.md](frontmatter-toml.md) (`+++` fences, multi-line
+  array), and [frontmatter-negative.md](frontmatter-negative.md), which
+  opens with a genuine thematic break and must keep rendering as
+  ordinary prose.
 
 ## Quick checklist
 
