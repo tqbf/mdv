@@ -77,6 +77,13 @@ struct MDVTheme: Identifiable, Hashable {
     var h1SizeEm: CGFloat = 1.75
     var h2SizeEm: CGFloat = 1.4
     var h3SizeEm: CGFloat = 1.15
+    /// h4–h6 are fixed across themes.
+    var h4SizeEm: CGFloat { 1.0 }
+    var h5SizeEm: CGFloat { 0.875 }
+    var h6SizeEm: CGFloat { 0.85 }
+    /// Heading font size relative to body, indexed by level − 1. Used by
+    /// `markdownTheme` and by math spans inside headings (MathMarkdown).
+    var headingSizeEms: [CGFloat] { [h1SizeEm, h2SizeEm, h3SizeEm, h4SizeEm, h5SizeEm, h6SizeEm] }
 
     /// Weight applied to h1–h6. Default `.semibold` matches MarkdownUI's
     /// gitHub theme. Themes that bundle a heavy face whose Regular is
@@ -410,11 +417,35 @@ extension MDVTheme {
     /// block builders so spacing/typography stays consistent across themes.
     var markdownTheme: Theme { markdownTheme(scale: 1.0) }
 
+    /// SwiftUI font for `bodyFontFamily` at `size`, for text rendered
+    /// outside MarkdownUI (the find-highlight path) that has to match the
+    /// article's body face. Mirrors MarkdownUI's own family resolution.
+    func bodyFont(size: CGFloat) -> Font {
+        switch bodyFontFamily {
+        case .system(let design): return .system(size: size, design: design)
+        case .custom(let name): return .custom(name, fixedSize: size)
+        }
+    }
+
     /// Same as `markdownTheme` but multiplies the body font size by `scale`.
     /// Heading sizes are em-relative so they scale automatically with body;
     /// per-element point spacing is left as-is to match browser-style zoom
     /// (text grows but the column doesn't change shape).
-    func markdownTheme(scale: CGFloat) -> Theme {
+    ///
+    /// `forPrint` reaches only the code-block chrome: printed code must
+    /// soft-wrap (no horizontal ScrollView on paper) and drops the hover
+    /// toolbar.
+    ///
+    /// `marginScale` multiplies the *absolute point* margins — paragraph and
+    /// heading rhythm, the code-block, table and thematic-break gaps — so a
+    /// caller rendering at a reduced type scale (print) keeps the *proportions*
+    /// the screen shows. Screen zoom leaves it at 1: the column doesn't change
+    /// shape there.
+    func markdownTheme(
+        scale: CGFloat,
+        forPrint: Bool = false,
+        marginScale: CGFloat = 1
+    ) -> Theme {
         let bg = self.background
         let sbg = self.secondaryBackground
         let txt = self.text
@@ -429,19 +460,22 @@ extension MDVTheme {
 
         let family = self.bodyFontFamily
         let bodySize = self.baseFontSize * scale
+        let m = marginScale
         let lineEm = self.paragraphLineSpacingEm
         let h1 = self.h1SizeEm
         let h2 = self.h2SizeEm
         let h3 = self.h3SizeEm
+        let h5 = self.h5SizeEm
+        let h6 = self.h6SizeEm
         let h1Rule = self.showH1Rule
         let h2Rule = self.showH2Rule
-        let pBottom = self.paragraphBottomSpacing
-        let h1Top = self.h1TopSpacing
-        let h1Bottom = self.h1BottomSpacing
-        let h2Top = self.h2TopSpacing
-        let h2Bottom = self.h2BottomSpacing
-        let h3Top = self.h3TopSpacing
-        let h3Bottom = self.h3BottomSpacing
+        let pBottom = self.paragraphBottomSpacing * m
+        let h1Top = self.h1TopSpacing * m
+        let h1Bottom = self.h1BottomSpacing * m
+        let h2Top = self.h2TopSpacing * m
+        let h2Bottom = self.h2BottomSpacing * m
+        let h3Top = self.h3TopSpacing * m
+        let h3Bottom = self.h3BottomSpacing * m
         let headWeight = self.headingFontWeight
         let strongWeight = self.strongFontWeight
 
@@ -505,7 +539,7 @@ extension MDVTheme {
             .heading4 { configuration in
                 configuration.label
                     .relativeLineSpacing(.em(0.125))
-                    .markdownMargin(top: 24, bottom: 16)
+                    .markdownMargin(top: 24 * m, bottom: 16 * m)
                     .markdownTextStyle {
                         FontWeight(headWeight)
                         ForegroundColor(head)
@@ -514,20 +548,20 @@ extension MDVTheme {
             .heading5 { configuration in
                 configuration.label
                     .relativeLineSpacing(.em(0.125))
-                    .markdownMargin(top: 24, bottom: 16)
+                    .markdownMargin(top: 24 * m, bottom: 16 * m)
                     .markdownTextStyle {
                         FontWeight(headWeight)
-                        FontSize(.em(0.875))
+                        FontSize(.em(h5))
                         ForegroundColor(head)
                     }
             }
             .heading6 { configuration in
                 configuration.label
                     .relativeLineSpacing(.em(0.125))
-                    .markdownMargin(top: 24, bottom: 16)
+                    .markdownMargin(top: 24 * m, bottom: 16 * m)
                     .markdownTextStyle {
                         FontWeight(headWeight)
-                        FontSize(.em(0.85))
+                        FontSize(.em(h6))
                         ForegroundColor(ttxt)
                     }
             }
@@ -554,8 +588,14 @@ extension MDVTheme {
                 // menu. Font + colors are set inside MDVCodeSyntaxHighlighter —
                 // the configuration.label here is the Text we produced and we
                 // don't apply markdownTextStyle font/size on top of it.
-                CodeBlockChrome(configuration: configuration, theme: self)
-                    .markdownMargin(top: 0, bottom: 16)
+                CodeBlockChrome(
+                    configuration: configuration,
+                    theme: self,
+                    scale: scale,
+                    marginScale: m,
+                    forPrint: forPrint
+                )
+                    .markdownMargin(top: 0, bottom: 16 * m)
             }
             .listItem { configuration in
                 configuration.label
@@ -587,7 +627,7 @@ extension MDVTheme {
                     .fixedSize(horizontal: false, vertical: true)
                     .markdownTableBorderStyle(.init(color: bdr))
                     .markdownTableBackgroundStyle(.alternatingRows(bg, sbg))
-                    .markdownMargin(top: 0, bottom: 16)
+                    .markdownMargin(top: 0, bottom: 16 * m)
             }
             .tableCell { configuration in
                 configuration.label
@@ -598,15 +638,15 @@ extension MDVTheme {
                         BackgroundColor(nil)
                     }
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 13)
+                    .padding(.vertical, 6 * m)
+                    .padding(.horizontal, 13 * m)
                     .relativeLineSpacing(.em(0.25))
             }
             .thematicBreak {
                 Divider()
                     .relativeFrame(height: .em(0.25))
                     .overlay(bdr)
-                    .markdownMargin(top: 24, bottom: 24)
+                    .markdownMargin(top: 24 * m, bottom: 24 * m)
             }
     }
 }

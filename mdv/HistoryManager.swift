@@ -21,6 +21,10 @@ class HistoryManager: ObservableObject {
         // Bring the FTS index into sync with what's on disk for any entries
         // that pre-date the search feature, or files that have been edited
         // since they were last opened. Mtime-aware, so it's cheap.
+        // Search population == history (SPEC R-26): drop index rows for
+        // paths that fell out of the list (an older build's cap eviction,
+        // or a UserDefaults edit) before refreshing the survivors.
+        Database.shared.pruneIndex(keeping: entries.map { $0.path })
         Database.shared.reindex(paths: entries.map { $0.path })
     }
 
@@ -33,7 +37,11 @@ class HistoryManager: ObservableObject {
         entries.insert(entry, at: 0)
 
         if entries.count > maxEntries {
+            let evicted = entries[maxEntries...]
             entries = Array(entries.prefix(maxEntries))
+            // The evicted file leaves the search population with its row
+            // (SPEC R-26) — same as a swipe-delete.
+            for e in evicted { Database.shared.removeFile(at: e.path) }
         }
 
         save()

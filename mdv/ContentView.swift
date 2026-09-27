@@ -2,6 +2,7 @@ import SwiftUI
 import MarkdownUI
 import AppKit
 import CoreServices
+import Combine
 
 /// One frame of browser-style back/forward state: which file, plus where
 /// we were scrolled to inside it. Same-doc fragment clicks push a snapshot
@@ -51,6 +52,13 @@ struct ContentView: View {
     /// chevron button on the drag handle, or the matching expand chevron
     /// in the left edge gutter when collapsed.
     @AppStorage("mdv_sidebar_collapsed") private var sidebarCollapsed: Bool = false
+    /// Mirror of `selectedEntry`'s path, written on every selection change
+    /// so the File menu's Close items can see whether a file is open. App
+    /// scope can't read view @State; this is the same mirroring trick as
+    /// `sidebarCollapsed`.
+    @AppStorage("mdv_selected_path") private var selectedPath: String = ""
+    /// Drives the Close All confirmation sheet, raised by `.closeAllFiles`.
+    @State private var showCloseAllConfirm = false
     /// Tracks hover on the collapsed-state edge gutter so the expand
     /// chevron only reveals when the mouse approaches the left edge.
     @State private var edgeGutterHovered = false
@@ -63,7 +71,16 @@ struct ContentView: View {
     @State private var tocSearchQuery: String = ""
     @State private var tocSearchVisible: Bool = false
     @FocusState private var tocSearchFocused: Bool
-    private let inspectorWidth: CGFloat = 240
+    /// Inspector (TOC + bookmarks) width. Drag the divider on its left edge
+    /// to resize; persisted, unlike the history sidebar, because the TOC
+    /// is where long headings live and the chosen width is a real preference.
+    @AppStorage("mdv_inspector_width") private var inspectorWidthRaw: Double = 240
+    private var inspectorWidth: CGFloat {
+        min(max(CGFloat(inspectorWidthRaw), minInspectorWidth), maxInspectorWidth)
+    }
+    private let minInspectorWidth: CGFloat = 180
+    private let maxInspectorWidth: CGFloat = 520
+    @State private var inspectorHandleHovered = false
 
     // External editor (Edit button in toolbar)
     @AppStorage("mdv_editor_app_path") private var editorAppPath: String = ""
@@ -79,6 +96,12 @@ struct ContentView: View {
     /// via View → Load Remote Images, or by clicking any remote-image
     /// placeholder in the rendered document.
     @AppStorage("mdv_load_remote_images") private var loadRemoteImages: Bool = false
+
+    /// Whether a document's metadata header is drawn. Default on. Purely a
+    /// display choice: the header stays block 0 either way, so block
+    /// indices, bookmarks and find all behave the same whichever way this
+    /// sits. Toggle via View → Show Frontmatter.
+    @AppStorage("mdv_show_frontmatter") private var showFrontmatter: Bool = true
 
     /// Watches the currently-loaded file so external-editor saves push
     /// fresh content into the viewer automatically.
@@ -158,6 +181,14 @@ struct ContentView: View {
     /// the file being left so we can persist its scroll position before
     /// `rawMarkdown` flips to the new file.
     @State private var lastLoadedEntry: HistoryEntry? = nil
+    /// The window hosting this view (nil until attached); commands are
+    /// delivered only to the key window's ContentView (SPEC E-26).
+    @State private var hostWindow: NSWindow? = nil
+    /// File content read and decoded *before* `selectedEntry` changed
+    /// (SPEC R-04/E-03: an unreadable file must abort without touching
+    /// history or the selection). `loadCurrentEntry` consumes it when the
+    /// path matches so the file is read once per load.
+    @State private var preloadedContent: (path: String, text: String)? = nil
     /// Set by `loadCurrentEntry` immediately before it mutates `rawMarkdown`.
     /// The `.onChange(of: rawMarkdown)` handler consumes this to decide
     /// whether to restore a saved scroll position. Gating on this flag means
@@ -189,7 +220,12 @@ struct ContentView: View {
 
     struct TOCHeading: Identifiable {
         let level: Int
+        /// Display text: inline markdown stripped, math spans rendered as
+        /// Unicode (`$\pi$` → π).
         let text: String
+        /// Same but with math left as source, for GitHub-compatible slugs
+        /// (`#monte-carlo-pi-estimator`, not `…-π-…`).
+        let slugText: String
         let blockIndex: Int
         var id: Int { blockIndex }
     }
@@ -207,6 +243,7 @@ struct ContentView: View {
     @State private var currentMatchIndex: Int = 0
     @State private var findFieldRequestFocus: Bool = false
     @StateObject private var keyMonitor = KeyMonitor()
+    @StateObject private var fileStepMonitor = FileStepMonitor()
 
     // Global (cross-history) search
     @State private var globalQuery: String = ""
@@ -224,6 +261,10 @@ struct ContentView: View {
     /// to the sidebar.
     enum PaneFocus { case sidebar, viewer }
     @StateObject private var paneTracker = PaneTracker()
+
+    /// Arrow / page / space / home / end scrolling for the document pane.
+    /// See ScrollKeyMonitor.
+    @StateObject private var scrollKeyMonitor = ScrollKeyMonitor()
 
     final class PaneTracker: ObservableObject {
         @Published var lastFocusedPane: PaneFocus = .viewer
@@ -283,6 +324,35 @@ struct ContentView: View {
         deinit { uninstall() }
     }
 
+    /// ⌃⇥ / ⌃⇧⇥ as a second binding for Next / Previous File. A SwiftUI
+    /// menu item carries exactly one key equivalent, and the Navigate menu
+    /// already spends it on ⇧⌘] / ⇧⌘[, so the Tab pair comes from a local
+    /// key monitor instead. Only Control-modified Tab is swallowed —
+    /// unmodified Tab still reaches whatever has focus (the find bar and
+    /// the history search field both live on it).
+    final class FileStepMonitor: ObservableObject {
+        private var monitor: Any?
+
+        func install(step: @escaping (Int) -> Void) {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                guard event.keyCode == 48,
+                      event.modifierFlags.contains(.control) else { return event }
+                step(event.modifierFlags.contains(.shift) ? -1 : 1)
+                return nil
+            }
+        }
+
+        func uninstall() {
+            if let m = monitor {
+                NSEvent.removeMonitor(m)
+                monitor = nil
+            }
+        }
+
+        deinit { uninstall() }
+    }
+
 
     private let minSidebarWidth: CGFloat = 180
     private let maxSidebarWidth: CGFloat = 400
@@ -303,6 +373,8 @@ struct ContentView: View {
         .environment(\.openURL, OpenURLAction { url in handleLinkClick(url) })
         .background(WindowAccessor { window in
             applyThemeToWindow(window)
+            DocumentWindows.register(window)
+            if hostWindow !== window { hostWindow = window }
         })
         .onChange(of: themes.current.id) { _ in
             for window in NSApp.windows { applyThemeToWindow(window) }
@@ -329,6 +401,16 @@ struct ContentView: View {
             backStack.append(NavSnapshot(entry: prev, topBlockIndex: leavingTop))
             forwardStack.removeAll()
         }
+        .confirmationDialog(
+            "Close all files?",
+            isPresented: $showCloseAllConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Close All", role: .destructive) { closeAllFiles() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This clears the sidebar history and the search index.")
+        }
     }
 
     /// HStack + toolbar + every notification / lifecycle handler. Split out
@@ -351,7 +433,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if inspectorVisible {
-                Divider()
+                inspectorDragHandle
                 inspectorPanel
                     .frame(width: inspectorWidth)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -362,6 +444,7 @@ struct ContentView: View {
         .navigationTitle(selectedEntry?.filename ?? "mdv")
         .toolbar { toolbarContent }
         .modifier(NotificationHandlers(
+            hostWindow: hostWindow,
             openFile: openFileDialog,
             openFileInNewWindow: openFileDialogInNewWindow,
             openURLInWindow: { url in loadFile(url) },
@@ -380,14 +463,23 @@ struct ContentView: View {
             forgetExternalEditor: { editorAppPath = "" },
             navigateBack: goBack,
             navigateForward: goForward,
-            toggleSidebar: toggleSidebar
+            toggleSidebar: toggleSidebar,
+            printDocument: printCurrentDocument,
+            closeFile: closeFile,
+            closeAllFiles: requestCloseAll,
+            nextFile: { stepFile(by: 1) },
+            previousFile: { stepFile(by: -1) }
         ))
         .onOpenURL { url in
+            // `AppDelegate.application(_:open:)` normally takes open events;
+            // if SwiftUI delivers one here too, only the key window acts.
+            guard hostWindow == nil || hostWindow?.isKeyWindow == true || NSApp.keyWindow == nil else { return }
             loadFile(url)
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             handleDrop(providers)
         }
+        .task { await selftestPrintIfNeeded() }  // TEMP SELF-TEST (delete)
         .onChange(of: selectedEntry) { _ in
             // Persist the leaving file's scroll position FIRST, before we touch
             // `rawMarkdown` via `loadCurrentEntry`. We deliberately use
@@ -408,6 +500,7 @@ struct ContentView: View {
             bookmarkNavInProgress = false
             loadCurrentEntry()
             lastLoadedEntry = selectedEntry
+            selectedPath = selectedEntry?.path ?? ""
         }
         .onChange(of: rawMarkdown) { _ in
             if isSearching { recomputeMatches() }
@@ -508,12 +601,22 @@ struct ContentView: View {
         .onAppear {
             paneTracker.sidebarRightEdge = sidebarCollapsed ? 0 : (sidebarWidth + 8) // include drag handle width
             paneTracker.install()
+            fileStepMonitor.install { stepFile(by: $0) }
             if let url = initialURL {
                 loadFile(url)
-            } else if let last = history.entries.first {
-                selectedEntry = last
+            } else if let last = history.entries.first, select(last) {
+                // `select` set `selectedEntry`; on macOS 13 the onChange
+                // handlers don't fire for a write made inside onAppear, so
+                // load explicitly (selecting route: history untouched).
                 loadCurrentEntry()
                 lastLoadedEntry = last
+                selectedPath = last.path
+            } else {
+                // Nothing to open. The selection mirror persists across
+                // launches, so clear it explicitly — no selection change
+                // fires here to do it for us, and a stale path would leave
+                // File → Close File enabled over an empty window.
+                selectedPath = ""
             }
         }
         .onDisappear {
@@ -523,6 +626,7 @@ struct ContentView: View {
                 persistScrollPosition(for: entry)
             }
             paneTracker.uninstall()
+            fileStepMonitor.uninstall()
         }
         .onChange(of: sidebarWidth) { newValue in
             if !sidebarCollapsed {
@@ -634,7 +738,7 @@ struct ContentView: View {
     }
 
     private var historyList: some View {
-        List(selection: $selectedEntry) {
+        List(selection: sidebarSelection) {
             ForEach(history.entries) { entry in
                 sidebarRow(entry)
                     .tag(entry)
@@ -849,7 +953,7 @@ struct ContentView: View {
     private func openHit(_ hit: Database.SearchHit) {
         let q = globalQuery
         if let entry = history.entries.first(where: { $0.path == hit.path }) {
-            selectedEntry = entry
+            if !select(entry) { NSSound.beep() }
         } else {
             // Fallback if the file is in the index but not in the in-memory history
             // (shouldn't happen today, but guards against future drift).
@@ -938,9 +1042,59 @@ struct ContentView: View {
 
     private func delete(_ entry: HistoryEntry) {
         let wasSelected = selectedEntry?.id == entry.id
+        // The file is leaving the sidebar for good, so drop it from the
+        // nav stacks too — otherwise ⌘← walks back into a file the list
+        // no longer shows (and `history.remove` has already deleted its
+        // saved scroll position). Match on path: revisits mint a fresh
+        // HistoryEntry id, so old snapshots of the same file differ by id.
+        backStack.removeAll { $0.entry.path == entry.path }
+        forwardStack.removeAll { $0.entry.path == entry.path }
         history.remove(entry)
+        // A removed row's snapshots go with it (SPEC R-18) so ⌘← never
+        // shows a document that has no history row.
+        backStack.removeAll { $0.entry.path == entry.path }
+        forwardStack.removeAll { $0.entry.path == entry.path }
         if wasSelected {
-            selectedEntry = history.entries.first
+            // Two bits of leaving-the-file bookkeeping the selection
+            // onChange handlers would otherwise get wrong here:
+            //   - `lastLoadedEntry` drives persistScrollPosition. The row
+            //     it would write was just deleted by `history.remove`, so
+            //     saving one back leaves an orphan. Clearing it skips that
+            //     branch; the handler re-arms it from the new selection.
+            //   - closing a file isn't a navigation, so suppress the
+            //     back-stack push (the handler clears the flag).
+            lastLoadedEntry = nil
+            suppressBackStackPush = true
+            if let next = history.entries.first, select(next) { return }
+            selectedEntry = nil
+        }
+    }
+
+    /// File → Close File (⌘W). Takes the same path as the swipe / context
+    /// menu delete, so the next sidebar entry becomes current — or the
+    /// empty state shows when that was the last file.
+    private func closeFile() {
+        guard let entry = selectedEntry else { return }
+        delete(entry)
+    }
+
+    /// File → Close All (⌥⌘W). Destructive enough to confirm first.
+    private func requestCloseAll() {
+        guard !history.entries.isEmpty else { return }
+        showCloseAllConfirm = true
+    }
+
+    private func closeAllFiles() {
+        backStack.removeAll()
+        forwardStack.removeAll()
+        history.clear()
+        // Same bookkeeping as `delete`: `history.clear` has already dropped
+        // every saved scroll position, so don't let the selection change
+        // write one back, and don't push the cleared file onto the stack.
+        if selectedEntry != nil {
+            lastLoadedEntry = nil
+            suppressBackStackPush = true
+            selectedEntry = nil
         }
     }
 
@@ -1133,6 +1287,31 @@ struct ContentView: View {
         )
     }
 
+    /// Mirror of `dragHandle` for the inspector's left edge. Dragging left
+    /// widens the panel. No collapse chevron — the toolbar button owns that.
+    private var inspectorDragHandle: some View {
+        ZStack {
+            Color.clear
+                .frame(width: 8)
+                .contentShape(Rectangle())
+            Rectangle()
+                .fill(inspectorHandleHovered ? themes.current.accent.opacity(0.5) : themes.current.divider)
+                .frame(width: inspectorHandleHovered ? 2 : 1)
+                .animation(.easeInOut(duration: 0.15), value: inspectorHandleHovered)
+        }
+        .onHover { inside in
+            inspectorHandleHovered = inside
+            if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let newWidth = inspectorWidth - value.translation.width
+                    inspectorWidthRaw = Double(min(max(newWidth, minInspectorWidth), maxInspectorWidth))
+                }
+        )
+    }
+
     /// Thin (6pt) hot zone painted on the left edge while the sidebar is
     /// collapsed. The chevron-right expand button stays visible at all
     /// times — when the sidebar is hidden there's no other cue that it
@@ -1205,7 +1384,9 @@ struct ContentView: View {
 
     private var markdownView: some View {
         Group {
-            if rawMarkdown.isEmpty {
+            if selectedEntry == nil {
+                // EMPTY (SPEC §3.1) means no file selected — an empty file
+                // shows an empty article with its row selected (R-04).
                 emptyState
             } else {
                 ScrollViewReader { proxy in
@@ -1286,6 +1467,7 @@ struct ContentView: View {
                         .frame(maxWidth: themes.current.articleMaxWidth ?? .infinity, alignment: .leading)
                         .frame(maxWidth: .infinity,
                                alignment: themes.current.articleMaxWidth == nil ? .leading : .center)
+                        .background(EnclosingScrollViewAccessor { scrollKeyMonitor.scrollView = $0 })
                     }
                     .onChange(of: currentMatchIndex) { _ in
                         scrollToCurrentMatch(proxy: proxy)
@@ -1392,6 +1574,10 @@ struct ContentView: View {
 
     private var blocks: [String] { document.blocks }
 
+    /// Rows of the document's metadata header, when it has one. Non-nil
+    /// means `blocks[0]` is that header.
+    private var frontmatter: [FrontmatterRow]? { document.frontmatter }
+
     // MARK: - Section copy
 
     /// True if the block at `idx` is an ATX heading (`#`, `##`, `###`).
@@ -1437,6 +1623,55 @@ struct ContentView: View {
         }
         flashClearWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+    }
+
+    // MARK: - Print
+
+    /// ⌘P / File > Print. Always prints in High Contrast (the light,
+    /// GitHub-style theme) regardless of the on-screen theme — classic
+    /// ink-friendly print behavior; the screen is untouched.
+    private func printCurrentDocument() {
+        guard !rawMarkdown.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let printTheme = MDVTheme.highContrast
+        PrintController.printDocument(PrintController.Request(
+            blocks: blocks,
+            jobTitle: selectedEntry?.filename ?? "mdv",
+            theme: printTheme,
+            baseURL: currentDocumentDirectory,
+            smartTypography: userSmartTypography && printTheme.smartTypographyAllowed,
+            window: NSApp.keyWindow,
+            // WYSIWYG: nil = no header (ordinary markdown), [] = header
+            // exists but is hidden on screen (print nothing for it).
+            frontmatter: showFrontmatter ? frontmatter : []
+        ))
+    }
+
+    /// TEMP SELF-TEST (delete): `MDV_PRINT_TEST=/path/to/file.md` → load the
+    /// file, run the print pipeline to a PDF next to it, and terminate.
+    @MainActor
+    private func selftestPrintIfNeeded() async {
+        guard let path = ProcessInfo.processInfo.environment["MDV_PRINT_TEST"] else { return }
+        loadFile(URL(fileURLWithPath: path))
+        for _ in 0..<150 where rawMarkdown.isEmpty {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        let printTheme = MDVTheme.highContrast
+        let request = PrintController.Request(
+            blocks: blocks,
+            jobTitle: "selftest",
+            theme: printTheme,
+            baseURL: currentDocumentDirectory,
+            smartTypography: false,
+            window: nil,
+            frontmatter: showFrontmatter ? frontmatter : []
+        )
+        try? await Task.sleep(for: .seconds(1))
+        await PrintController.selfTestPDF(request, to: URL(fileURLWithPath: path + ".print.pdf"))
+        print("MDV_SELFTEST: wrote \(path).print.pdf")
+        NSApp.terminate(nil)
     }
 
     // MARK: - Table of Contents
@@ -2018,22 +2253,42 @@ struct ContentView: View {
     /// inline (paragraph / heading / list / blockquote — i.e. not code or
     /// table), swap MarkdownUI for an AttributedString-based Text so we
     /// can paint a yellow highlight on the matched substrings themselves.
-    /// Other blocks keep MarkdownUI's full rendering and rely on the
-    /// block-level tint for find feedback.
+    /// Other blocks keep MarkdownUI's full rendering — bar a metadata
+    /// header, which gets its own table — and rely on the block-level
+    /// tint for find feedback.
     @ViewBuilder
     private func blockView(block: String, idx: Int) -> some View {
         if shouldInlineHighlight(block: block, idx: idx) {
-            // Find-highlight path: render straight punctuation. Smartening
-            // here would shift character offsets and misalign the yellow
-            // highlight ranges (which were computed against rawMarkdown).
-            // The mismatch only surfaces while find is active in matched
-            // blocks; everything else still gets smart typography.
-            Text(highlightedAttributedString(for: block, idx: idx))
-                .frame(maxWidth: .infinity, alignment: .leading)
+            findHighlightView(block: block, idx: idx)
+        } else if idx == 0, let rows = frontmatter {
+            // Metadata, not prose: a properties table rather than markdown.
+            // Ordered after the find branch on purpose — while find is
+            // active the header shows its source text with the matches
+            // highlighted, same as every other block. That ordering is also
+            // what reveals a header hidden below: a match inside it stays
+            // reachable and visible for as long as find is running, the way
+            // an editor shows hits inside a folded region, so find never
+            // sends the reader to a block that draws nothing.
+            if showFrontmatter {
+                FrontmatterTableView(
+                    rows: rows,
+                    theme: themes.current,
+                    fontScale: themes.fontScale
+                )
+            }
         } else {
-            Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
+            // Math spans become image references first; smartening runs
+            // after so it never touches LaTeX (it already skips `](…)` URLs).
+            let withMath = MathMarkdown.rewrite(
+                RawHTMLImages.rewrite(block),
+                fontSize: themes.current.baseFontSize * themes.fontScale,
+                headingSizeEms: themes.current.headingSizeEms,
+                color: NSColor(themes.current.text)
+            )
+            Markdown(smartTypographyEnabled ? smartenMarkdown(withMath) : withMath)
                 .markdownTheme(themes.current.markdownTheme(scale: themes.fontScale))
-                .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
+                .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current, scale: themes.fontScale))
+                .markdownInlineImageProvider(MathInlineImageProvider(baseURL: currentDocumentDirectory))
                 .markdownImageProvider(LocalImageProvider(
                     baseURL: currentDocumentDirectory,
                     loadRemoteImages: loadRemoteImages
@@ -2126,7 +2381,10 @@ struct ContentView: View {
                     pendingFragment = frag
                 }
             }
-            loadFile(resolved)
+            if !loadFile(resolved) {
+                // Exists but unreadable/undecodable (E-03): stay put.
+                pendingFragment = nil
+            }
             return .handled
         }
 
@@ -2143,19 +2401,43 @@ struct ContentView: View {
     }
 
     private func goBack() {
-        guard let prev = backStack.popLast() else { return }
-        if let current = selectedEntry {
-            forwardStack.append(NavSnapshot(entry: current, topBlockIndex: topVisibleBlock))
-        }
-        applySnapshot(prev)
+        guard let prev = popLiveSnapshot(from: &backStack) else { return }
+        let current = selectedEntry.map { NavSnapshot(entry: $0, topBlockIndex: topVisibleBlock) }
+        // Missing file: beep, snapshot discarded, view unchanged (E-27).
+        guard applySnapshot(prev) else { NSSound.beep(); return }
+        if let current { forwardStack.append(current) }
     }
 
     private func goForward() {
-        guard let next = forwardStack.popLast() else { return }
-        if let current = selectedEntry {
-            backStack.append(NavSnapshot(entry: current, topBlockIndex: topVisibleBlock))
+        guard let next = popLiveSnapshot(from: &forwardStack) else { return }
+        let current = selectedEntry.map { NavSnapshot(entry: $0, topBlockIndex: topVisibleBlock) }
+        guard applySnapshot(next) else { NSSound.beep(); return }
+        if let current { backStack.append(current) }
+    }
+
+    /// Pop the newest snapshot whose entry still has a history row. Rows
+    /// evicted by the 100-entry cap leave stale snapshots behind (delete
+    /// prunes eagerly); skip them here so ⌘← never resurrects a rowless
+    /// document (SPEC R-18).
+    private func popLiveSnapshot(from stack: inout [NavSnapshot]) -> NavSnapshot? {
+        while let snap = stack.popLast() {
+            if history.entries.contains(where: { $0.path == snap.entry.path }) { return snap }
         }
-        applySnapshot(next)
+        return nil
+    }
+
+    /// ⇧⌘] / ⇧⌘[ (and ⌃⇥ / ⌃⇧⇥): move the selection one row down or up
+    /// the sidebar, clamped at both ends — no wrap. Assigning
+    /// `selectedEntry` is exactly the sidebar-click path: unlike `loadFile`
+    /// it never calls `history.add`, so stepping doesn't hoist each file to
+    /// the top of the list and reorder it under the user mid-walk.
+    private func stepFile(by offset: Int) {
+        guard let current = selectedEntry,
+              let idx = history.entries.firstIndex(where: { $0.path == current.path })
+        else { return }
+        let target = idx + offset
+        guard target >= 0, target < history.entries.count else { return }
+        selectedEntry = history.entries[target]
     }
 
     /// Push a snapshot of the current view onto `backStack` for a
@@ -2172,17 +2454,25 @@ struct ContentView: View {
     /// back-stack push so the walk doesn't push itself back on) and scroll
     /// to the captured block. Same-doc snapshots skip the file switch and
     /// just scroll.
-    private func applySnapshot(_ snap: NavSnapshot) {
+    @discardableResult
+    private func applySnapshot(_ snap: NavSnapshot) -> Bool {
         if snap.entry.path == selectedEntry?.path {
             tocScrollTrigger = snap.topBlockIndex
-        } else {
-            suppressBackStackPush = true
-            selectedEntry = snap.entry
-            // The new doc's blocks aren't laid out synchronously;
-            // pendingAnchorBlock is consumed by the ScrollViewReader
-            // once the layout settles (~50ms — see its onChange handler).
-            pendingAnchorBlock = snap.topBlockIndex
+            return true
         }
+        // Re-opened rows get a fresh id (`history.add`); select the row the
+        // list holds now so the sidebar highlights it.
+        let entry = history.entries.first(where: { $0.path == snap.entry.path }) ?? snap.entry
+        suppressBackStackPush = true
+        guard select(entry) else {
+            suppressBackStackPush = false
+            return false
+        }
+        // The new doc's blocks aren't laid out synchronously;
+        // pendingAnchorBlock is consumed by the ScrollViewReader
+        // once the layout settles (~50ms — see its onChange handler).
+        pendingAnchorBlock = snap.topBlockIndex
+        return true
     }
 
     /// Scrolls the markdown viewport to the heading whose GitHub-flavored
@@ -2190,7 +2480,7 @@ struct ContentView: View {
     /// or pointed at something the parser didn't classify as a heading).
     private func scrollToFragment(_ fragment: String) {
         let target = headingSlug(fragment)
-        guard let heading = tocHeadings.first(where: { headingSlug($0.text) == target }) else {
+        guard let heading = tocHeadings.first(where: { headingSlug($0.slugText) == target }) else {
             return
         }
         tocScrollTrigger = heading.blockIndex
@@ -2202,22 +2492,25 @@ struct ContentView: View {
     /// so it can be applied to both the URL fragment and the heading
     /// text without thinking about which is which.
     private func headingSlug(_ s: String) -> String {
+        // GitHub's rule (SPEC C-11): every whitespace *run* becomes one `-`
+        // once something precedes it — even directly after a `-` or after a
+        // dropped character — so `a - b` → `a---b` and `C++ & Rust` →
+        // `c--rust`, matching the fragments GitHub generates.
         var out = ""
-        var lastWasHyphen = false
+        var inWhitespaceRun = false
         for ch in s.lowercased() {
+            if ch.isWhitespace {
+                if !out.isEmpty && !inWhitespaceRun {
+                    out.append("-")
+                }
+                inWhitespaceRun = true
+                continue
+            }
+            inWhitespaceRun = false
             if ch.isLetter || ch.isNumber {
                 out.append(ch)
-                lastWasHyphen = false
             } else if ch == "-" || ch == "_" {
-                if !out.isEmpty {
-                    out.append(ch)
-                    lastWasHyphen = (ch == "-")
-                }
-            } else if ch.isWhitespace {
-                if !out.isEmpty && !lastWasHyphen {
-                    out.append("-")
-                    lastWasHyphen = true
-                }
+                if !out.isEmpty { out.append(ch) }
             }
         }
         while out.last == "-" || out.last == "_" { out.removeLast() }
@@ -2229,6 +2522,9 @@ struct ContentView: View {
         guard matches.contains(where: { $0.blockIndex == idx }) else { return false }
         let trimmed = block.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") { return false }
+        // A `$$` math fence (C-02 rule 3) can't be re-rendered as inline
+        // text without showing LaTeX source — tint it whole (SPEC R-24, E-17).
+        if trimmed.hasPrefix("$$") { return false }
         // Crude table detection: header row of pipes followed by an alignment row.
         let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
         if lines.count >= 2,
@@ -2244,7 +2540,75 @@ struct ContentView: View {
         return true
     }
 
-    private func highlightedAttributedString(for block: String, idx: Int) -> AttributedString {
+    /// Find-highlight path: the block is rendered as a plain `Text` so each
+    /// query occurrence can carry its own background, which MarkdownUI's
+    /// block styles can't express. Renders straight punctuation: smartening
+    /// here would shift character offsets and misalign the yellow highlight
+    /// ranges (which were computed against rawMarkdown). The mismatch only
+    /// surfaces while find is active in matched blocks; everything else
+    /// still gets smart typography.
+    private func findHighlightView(block: String, idx: Int) -> some View {
+        let level = headingLevel(of: block)
+        let style = findBlockStyle(headingLevel: level)
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(highlightedAttributedString(for: block, idx: idx, style: style))
+                .font(style.font)
+                .lineSpacing(style.lineSpacing)
+                .padding(.bottom, level == 1 || level == 2 ? style.size * 0.3 : 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if style.rule { Divider().overlay(themes.current.divider) }
+        }
+    }
+
+    /// ATX heading level (1–6) of a block, or nil for body text.
+    private func headingLevel(of block: String) -> Int? {
+        let trimmed = block.trimmingCharacters(in: .whitespaces)
+        let hashes = trimmed.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(hashes), trimmed.dropFirst(hashes).first == " " else { return nil }
+        return hashes
+    }
+
+    /// Block-level typography for the find-highlight path, mirroring the
+    /// theme's MarkdownUI text/heading styles so a matched block keeps the
+    /// face, size, weight, color and leading of its neighbors.
+    private struct FindBlockStyle {
+        let font: Font
+        let size: CGFloat
+        let color: Color
+        let lineSpacing: CGFloat
+        let rule: Bool
+    }
+
+    private func findBlockStyle(headingLevel: Int?) -> FindBlockStyle {
+        let theme = themes.current
+        let bodySize = theme.baseFontSize * themes.fontScale
+        let em: CGFloat
+        var color = theme.heading
+        var rule = false
+        switch headingLevel {
+        case 1: em = theme.h1SizeEm; rule = theme.showH1Rule
+        case 2: em = theme.h2SizeEm; rule = theme.showH2Rule
+        case 3: em = theme.h3SizeEm
+        case 4: em = 1.0
+        case 5: em = 0.875
+        case 6: em = 0.85; color = theme.tertiaryText
+        default: em = 1.0; color = theme.text
+        }
+        let size = round(bodySize * em)   // MarkdownUI rounds resolved sizes too
+        var font = theme.bodyFont(size: size)
+        let lineEm: CGFloat
+        if headingLevel != nil {
+            font = font.weight(theme.headingFontWeight)
+            lineEm = 0.125
+        } else {
+            lineEm = theme.paragraphLineSpacingEm
+        }
+        return FindBlockStyle(font: font, size: size, color: color,
+                              lineSpacing: size * lineEm, rule: rule)
+    }
+
+    private func highlightedAttributedString(for block: String, idx: Int,
+                                             style: FindBlockStyle) -> AttributedString {
         let theme = themes.current
         let isCurrentBlock = matches.indices.contains(currentMatchIndex)
                           && matches[currentMatchIndex].blockIndex == idx
@@ -2273,7 +2637,36 @@ struct ContentView: View {
         } catch {
             attr = AttributedString(cleaned)
         }
-        attr.foregroundColor = NSColor(theme.text)
+        attr.foregroundColor = NSColor(style.color)
+
+        // Inline runs: express the theme's code/strong/emphasis/link styling
+        // explicitly (weight and colors are per-theme, not SwiftUI's
+        // defaults) and clear the presentation intent so Text doesn't
+        // layer its own bold/italic/monospace on top. Snapshot the runs
+        // first; setting attributes re-segments them.
+        let runs = attr.runs.map { ($0.range, $0.inlinePresentationIntent ?? [], $0.link) }
+        for (range, intent, link) in runs {
+            var font: Font? = nil
+            if intent.contains(.code) {
+                font = .system(size: round(style.size * 0.90), design: .monospaced)
+                attr[range].backgroundColor = NSColor(theme.secondaryBackground)
+            }
+            if intent.contains(.stronglyEmphasized) {
+                font = (font ?? style.font).weight(theme.strongFontWeight)
+                attr[range].foregroundColor = NSColor(theme.strong)
+            }
+            if intent.contains(.emphasized) {
+                font = (font ?? style.font).italic()
+            }
+            if intent.contains(.strikethrough) {
+                attr[range].strikethroughStyle = .single
+            }
+            if link != nil {
+                attr[range].foregroundColor = NSColor(theme.link)
+            }
+            attr[range].font = font
+            attr[range].inlinePresentationIntent = nil
+        }
 
         // Highlight each occurrence of the query. Current-match block gets
         // a stronger yellow so the navigation focus is obvious.
@@ -2452,41 +2845,79 @@ struct ContentView: View {
         window.makeKeyAndOrderFront(nil)
     }
 
-    private func loadFile(_ url: URL) {
+    /// Adding route (SPEC R-01): read and decode first, then add the history
+    /// row and select it. Returns false — with nothing changed — when the
+    /// file is missing, unreadable, or not UTF-8 (E-03).
+    @discardableResult
+    private func loadFile(_ url: URL) -> Bool {
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return false }
         if isDir.boolValue {
-            loadDirectory(url)
-            return
+            return loadDirectory(url)
         }
-        guard FileManager.default.isReadableFile(atPath: url.path) else { return }
+        guard let content = readDocument(atPath: url.path) else { return false }
         let entry = history.add(path: url.path)
+        preloadedContent = (url.path, content)
         selectedEntry = entry
+        return true
+    }
+
+    /// The one read-and-decode used by every route. `nil` for a missing,
+    /// permission-denied, or non-UTF-8 file.
+    private func readDocument(atPath path: String) -> String? {
+        try? String(contentsOfFile: path, encoding: .utf8)
+    }
+
+    /// Selecting route (SPEC R-01): display an entry the history already
+    /// holds without reordering it or re-indexing. Returns false, with the
+    /// selection unchanged, when its file can't be read (E-03, E-27).
+    @discardableResult
+    private func select(_ entry: HistoryEntry) -> Bool {
+        guard let content = readDocument(atPath: entry.path) else { return false }
+        preloadedContent = (entry.path, content)
+        selectedEntry = entry
+        return true
+    }
+
+    /// `List(selection:)` binding that refuses a row whose file is gone
+    /// (E-03): the previous document and selection stay.
+    private var sidebarSelection: Binding<HistoryEntry?> {
+        Binding(
+            get: { selectedEntry },
+            set: { new in
+                guard let new else { selectedEntry = nil; return }
+                if new.id == selectedEntry?.id { return }
+                select(new)
+            }
+        )
     }
 
     /// When opened with a directory: pick README.md (case-insensitive) — or
     /// the alphabetically-first markdown file if there is no README — as the
     /// document to render, and seed history with the rest of the directory's
     /// markdown files so the sidebar surfaces them as siblings.
-    private func loadDirectory(_ url: URL) {
+    @discardableResult
+    private func loadDirectory(_ url: URL) -> Bool {
         let exts: Set<String> = ["md", "markdown", "mdown"]
         let fm = FileManager.default
         guard let contents = try? fm.contentsOfDirectory(
             at: url,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
-        ) else { return }
+        ) else { return false }
 
         let mdFiles = contents
             .filter { exts.contains($0.pathExtension.lowercased()) }
             .filter { fm.isReadableFile(atPath: $0.path) }
             .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
 
-        guard !mdFiles.isEmpty else { return }
+        guard !mdFiles.isEmpty else { return false }
 
         let primary = mdFiles.first {
             $0.deletingPathExtension().lastPathComponent.caseInsensitiveCompare("README") == .orderedSame
         } ?? mdFiles[0]
+        // Decode the primary before any history change (R-04/E-03).
+        guard let content = readDocument(atPath: primary.path) else { return false }
 
         // Seed siblings into history first (in reverse-alpha order, so once
         // each insert prepends, they end up alphabetical underneath the
@@ -2496,7 +2927,9 @@ struct ContentView: View {
             _ = history.add(path: sibling.path)
         }
         let entry = history.add(path: primary.path)
+        preloadedContent = (primary.path, content)
         selectedEntry = entry
+        return true
     }
 
     // MARK: - Bookmarks
@@ -2531,7 +2964,7 @@ struct ContentView: View {
             else { prefix = nil }
             if let pfx = prefix {
                 let firstLine = block.components(separatedBy: "\n").first ?? block
-                return stripInlineMarkdown(String(firstLine.dropFirst(pfx.count)))
+                return stripInlineMarkdown(MathMarkdown.plainText(String(firstLine.dropFirst(pfx.count))))
             }
         }
         // No heading nearby; use the block's own first content line as a label.
@@ -2630,7 +3063,7 @@ struct ContentView: View {
     /// we skip the reload and just scroll.
     private func jumpTo(path: String, blockIndex: Int, fingerprint: String) {
         let url = URL(fileURLWithPath: path)
-        if selectedEntry?.path == path && !rawMarkdown.isEmpty {
+        if selectedEntry?.path == path {
             // Same file; resolve the anchor against the current document and scroll.
             let resolved = resolveBookmarkAnchor(
                 blocks: blocks,
@@ -2642,7 +3075,11 @@ struct ContentView: View {
             // Different file. Stash the anchor; loadFile will trigger a
             // rawMarkdown change, after which we resolve and scroll.
             pendingPostLoadAnchor = (blockIndex, fingerprint)
-            loadFile(url)
+            if !loadFile(url) {
+                // Unreadable target (E-03/E-09/E-27): beep, nothing changes.
+                pendingPostLoadAnchor = nil
+                NSSound.beep()
+            }
         }
     }
 
@@ -2669,7 +3106,8 @@ struct ContentView: View {
 
     /// ⌘0: jump to the placeholder if one is set; beep otherwise.
     private func jumpToPlaceholder() {
-        guard let p = placeholder else {
+        // No placeholder, or its file is gone (E-27): beep, nothing else.
+        guard let p = placeholder, FileManager.default.fileExists(atPath: p.path) else {
             NSSound.beep()
             return
         }
@@ -2685,17 +3123,23 @@ struct ContentView: View {
             fileWatcher.cancel()
             return
         }
-        let url = URL(fileURLWithPath: entry.path)
         // Mark the upcoming `rawMarkdown` change as a fresh load so the
         // rawMarkdown onChange handler will restore the saved scroll
         // anchor for this file (if any). FileWatcher takes a different
         // path that doesn't set this flag — its reloads should leave
         // the viewport where it is.
         pendingScrollRestore = true
-        if let content = try? String(contentsOf: url, encoding: .utf8) {
+        if let pre = preloadedContent, pre.path == entry.path {
+            preloadedContent = nil
+            rawMarkdown = pre.text
+        } else if let content = readDocument(atPath: entry.path) {
             rawMarkdown = content
         } else {
-            rawMarkdown = ""
+            // Every route decodes before selecting (loadFile/select), so
+            // this is the file vanishing in between. Keep the page and the
+            // previous watch (E-03) rather than blanking the window.
+            pendingScrollRestore = false
+            return
         }
         // Re-arm the watcher for the (possibly new) selected file so an
         // external editor saving the file pushes the changes back into
@@ -2704,12 +3148,33 @@ struct ContentView: View {
         fileWatcher.watch(path: watchedPath) {
             // Still on the same entry? Re-read from disk.
             guard let current = self.selectedEntry, current.path == watchedPath else { return }
-            let fresh = (try? String(contentsOfFile: watchedPath, encoding: .utf8)) ?? ""
+            // A failed read — file deleted, moved away, or a half-written
+            // save that isn't valid UTF-8 yet — keeps the page as it is. The
+            // watcher is path-based, so a re-creation or the finished write
+            // fires again and lands normally.
+            guard let fresh = try? String(contentsOfFile: watchedPath, encoding: .utf8) else { return }
+            if fresh.isEmpty && !self.rawMarkdown.isEmpty {
+                // Zero bytes right after a change event is almost always an
+                // editor's truncate-then-write save caught mid-flight. Hold
+                // the current page and look again after the transient window;
+                // a file that is still empty then really is empty.
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.transientReadWindow) {
+                    guard let cur = self.selectedEntry, cur.path == watchedPath,
+                          let again = try? String(contentsOfFile: watchedPath, encoding: .utf8),
+                          again != self.rawMarkdown else { return }
+                    self.rawMarkdown = again
+                }
+                return
+            }
             if fresh != self.rawMarkdown {
                 self.rawMarkdown = fresh
             }
         }
     }
+
+    /// How long an empty read after a change event is treated as a
+    /// save-in-progress rather than a genuinely empty file (SPEC E-21, D-18).
+    private static let transientReadWindow: TimeInterval = 0.5
 
     /// Persist the current scroll anchor for `entry`. Reads
     /// `topVisibleBlock` (== `visibleBlocks.min()`). `visibleBlocks` is
@@ -2766,26 +3231,46 @@ fileprivate struct ParsedDocument: Equatable {
     let raw: String
     let blocks: [String]
     let tocHeadings: [ContentView.TOCHeading]
+    /// Display rows for `blocks[0]` when it is a metadata header, nil when
+    /// the document has none. Frontmatter is always block 0 by construction,
+    /// so callers never have to re-detect it — and parsing it here, once per
+    /// document, keeps it out of the per-render path like the rest.
+    let frontmatter: [FrontmatterRow]?
 
-    static let empty = ParsedDocument(raw: "", blocks: [], tocHeadings: [])
+    var hasFrontmatter: Bool { frontmatter != nil }
 
-    private init(raw: String, blocks: [String], tocHeadings: [ContentView.TOCHeading]) {
+    static let empty = ParsedDocument(raw: "", blocks: [], tocHeadings: [], frontmatter: nil)
+
+    private init(
+        raw: String,
+        blocks: [String],
+        tocHeadings: [ContentView.TOCHeading],
+        frontmatter: [FrontmatterRow]?
+    ) {
         self.raw = raw
         self.blocks = blocks
         self.tocHeadings = tocHeadings
+        self.frontmatter = frontmatter
     }
 
     init(raw: String) {
-        let blocks = Self.parseBlocks(raw)
+        // A metadata header is lifted out before the blank-line split so it
+        // stays one block even when it contains blank lines of its own; the
+        // body after the closing fence splits exactly as any document does.
+        let span = frontmatterSpan(in: raw)
+        let blocks = span.map { [$0.block] + Self.parseBlocks(String(raw[$0.bodyStart...])) }
+            ?? Self.parseBlocks(raw)
         self.init(
             raw: raw,
             blocks: blocks,
-            tocHeadings: Self.parseTOC(blocks: blocks)
+            tocHeadings: Self.parseTOC(blocks: blocks),
+            frontmatter: span.map { frontmatterRows($0.block) }
         )
     }
 
-    // `blocks` and `tocHeadings` are pure functions of `raw`, so equality
-    // on `raw` alone is sufficient and avoids walking two arrays.
+    // `blocks`, `tocHeadings` and `frontmatter` are pure functions of
+    // `raw`, so equality on `raw` alone is sufficient and avoids walking
+    // two arrays.
     static func == (lhs: ParsedDocument, rhs: ParsedDocument) -> Bool {
         lhs.raw == rhs.raw
     }
@@ -2798,8 +3283,18 @@ fileprivate struct ParsedDocument: Equatable {
         // code-blocks-or-prose, which mangles syntax highlighting.
         var result: [String] = []
         var current: [String] = []
-        var fenceMarker: String? = nil  // nil → outside, "```" or "~~~" → inside
-        let lines = raw.components(separatedBy: "\n")
+        var fenceMarker: String? = nil  // nil → outside, "```" / "~~~" / "$$" → inside
+        // Normalise line endings first. `CharacterSet.whitespaces` doesn't
+        // include `\r`, so a CRLF blank line ("\r") never read as blank and
+        // a Windows-authored file collapsed into a single block — one TOC
+        // entry, find tinting the whole page, every bookmark at block 0.
+        // (Foundation's `replacingOccurrences` works on UTF-16 and sees the
+        // `\r` inside a `\r\n` grapheme cluster; Swift's `String.contains`
+        // does not — "\r\n" is one Character — so there is no cheap guard.)
+        let normalized = raw
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
 
         func flush() {
             let joined = current.joined(separator: "\n")
@@ -2812,9 +3307,19 @@ fileprivate struct ParsedDocument: Equatable {
             let trimmedStart = line.drop(while: { $0 == " " })
             if let marker = fenceMarker {
                 current.append(line)
-                if trimmedStart.hasPrefix(marker) {
+                // Code fences close at line start; a `$$` closer may trail
+                // the last line of the formula.
+                if marker == "$$" ? line.contains("$$") : trimmedStart.hasPrefix(marker) {
                     fenceMarker = nil
                 }
+                continue
+            }
+            // Display math opened on this line but not closed on it: blank
+            // lines inside belong to the formula, same as a code fence.
+            if trimmedStart.hasPrefix("$$"), !trimmedStart.dropFirst(2).contains("$$") {
+                if !current.isEmpty { flush() }
+                current.append(line)
+                fenceMarker = "$$"
                 continue
             }
             if trimmedStart.hasPrefix("```") {
@@ -2859,8 +3364,12 @@ fileprivate struct ParsedDocument: Equatable {
             // Single-line headings only
             let firstLine = trimmed.components(separatedBy: "\n").first ?? trimmed
             let raw = String(firstLine.dropFirst(prefix.count))
-            let text = stripInlineMarkdown(raw)
-            result.append(ContentView.TOCHeading(level: level, text: text, blockIndex: idx))
+            result.append(ContentView.TOCHeading(
+                level: level,
+                text: stripInlineMarkdown(MathMarkdown.plainText(raw)),
+                slugText: stripInlineMarkdown(raw),
+                blockIndex: idx
+            ))
         }
         return result
     }
@@ -2876,7 +3385,10 @@ fileprivate func stripInlineMarkdown(_ s: String) -> String {
     out = out.replacingOccurrences(of: "`", with: "")
     // Bare * and _ around words (single-char emphasis)
     out = out.replacingOccurrences(of: #"(?<!\\)\*"#, with: "", options: .regularExpression)
-    out = out.replacingOccurrences(of: #"(?<![A-Za-z0-9])_(?=[^_]+_)"#, with: "", options: .regularExpression)
+    // `_emph_` pairs whose opener isn't word-internal: drop both underscores
+    // (SPEC C-12). `snake_case_name` keeps its underscores because the
+    // opening `_` follows a letter.
+    out = out.replacingOccurrences(of: #"(?<![A-Za-z0-9])_([^_]+)_"#, with: "$1", options: .regularExpression)
     // Markdown links [text](url) → text
     out = out.replacingOccurrences(
         of: #"\[([^\]]+)\]\([^)]+\)"#,
@@ -3029,6 +3541,8 @@ struct WindowAccessor: NSViewRepresentable {
 /// modifier chain lives inside `body(content:)` instead of dangling off
 /// the `HStack`.
 private struct NotificationHandlers: ViewModifier {
+    /// The `NSWindow` hosting this view, captured by `WindowAccessor`.
+    let hostWindow: NSWindow?
     let openFile: () -> Void
     let openFileInNewWindow: () -> Void
     let openURLInWindow: (URL) -> Void
@@ -3044,28 +3558,72 @@ private struct NotificationHandlers: ViewModifier {
     let navigateBack: () -> Void
     let navigateForward: () -> Void
     let toggleSidebar: () -> Void
+    let printDocument: () -> Void
+    let closeFile: () -> Void
+    let closeAllFiles: () -> Void
+    let nextFile: () -> Void
+    let previousFile: () -> Void
+
+    /// Commands are process-wide notifications; every window's ContentView
+    /// subscribes. Only the window the command is addressed to acts (SPEC
+    /// R-01, E-26): menu posts and open events carry the key window in
+    /// `userInfo`. An unaddressed post only happens before any window
+    /// exists (cold start), in which case the first window takes it.
+    private func addressedToMe(_ notif: Notification) -> Bool {
+        guard let host = hostWindow else {
+            // Not attached to a window yet — only possible at a cold start,
+            // when this is the sole window.
+            return true
+        }
+        guard let target = notif.targetWindow else {
+            return host.isKeyWindow || NSApp.keyWindow == nil
+        }
+        return target == host
+    }
+
+    private func publisher(_ name: Notification.Name) -> AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: name)
+            .filter(addressedToMe)
+            .eraseToAnyPublisher()
+    }
 
     func body(content: Content) -> some View {
+        secondHalf(firstHalf(content))
+    }
+
+    /// The chain is split in two for the same reason it was lifted out of
+    /// `body` in the first place: one straight run of every `.onReceive`
+    /// exceeds the type-checker's expression-complexity budget.
+    private func firstHalf<V: View>(_ content: V) -> some View {
         content
-            .onReceive(NotificationCenter.default.publisher(for: .toggleSidebar)) { _ in toggleSidebar() }
-            .onReceive(NotificationCenter.default.publisher(for: .openFile)) { _ in openFile() }
-            .onReceive(NotificationCenter.default.publisher(for: .openFileInNewWindow)) { _ in openFileInNewWindow() }
-            .onReceive(NotificationCenter.default.publisher(for: .openURLInWindow)) { notif in
+            .onReceive(publisher(.toggleSidebar)) { _ in toggleSidebar() }
+            .onReceive(publisher(.openFile)) { _ in openFile() }
+            .onReceive(publisher(.openFileInNewWindow)) { _ in openFileInNewWindow() }
+            .onReceive(publisher(.openURLInWindow)) { notif in
                 if let url = notif.object as? URL { openURLInWindow(url) }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .findInDocument)) { _ in findInDocument() }
-            .onReceive(NotificationCenter.default.publisher(for: .searchHistory)) { _ in searchHistory() }
-            .onReceive(NotificationCenter.default.publisher(for: .toggleBookmark)) { _ in toggleBookmark() }
-            .onReceive(NotificationCenter.default.publisher(for: .openBookmarkSlot)) { notif in
+            .onReceive(publisher(.findInDocument)) { _ in findInDocument() }
+            .onReceive(publisher(.searchHistory)) { _ in searchHistory() }
+            .onReceive(publisher(.toggleBookmark)) { _ in toggleBookmark() }
+            .onReceive(publisher(.openBookmarkSlot)) { notif in
                 if let n = notif.object as? Int { openBookmarkSlot(n) }
             }
-            .onReceive(NotificationCenter.default.publisher(for: .setPlaceholder)) { _ in setPlaceholder() }
-            .onReceive(NotificationCenter.default.publisher(for: .jumpToPlaceholder)) { _ in jumpToPlaceholder() }
-            .onReceive(NotificationCenter.default.publisher(for: .chooseExternalEditor)) { _ in chooseExternalEditor() }
-            .onReceive(NotificationCenter.default.publisher(for: .openInExternalEditor)) { _ in openInExternalEditor() }
-            .onReceive(NotificationCenter.default.publisher(for: .forgetExternalEditor)) { _ in forgetExternalEditor() }
-            .onReceive(NotificationCenter.default.publisher(for: .navigateBack)) { _ in navigateBack() }
-            .onReceive(NotificationCenter.default.publisher(for: .navigateForward)) { _ in navigateForward() }
+            .onReceive(publisher(.setPlaceholder)) { _ in setPlaceholder() }
+            .onReceive(publisher(.jumpToPlaceholder)) { _ in jumpToPlaceholder() }
+            .onReceive(publisher(.chooseExternalEditor)) { _ in chooseExternalEditor() }
+            .onReceive(publisher(.openInExternalEditor)) { _ in openInExternalEditor() }
+            .onReceive(publisher(.forgetExternalEditor)) { _ in forgetExternalEditor() }
+            .onReceive(publisher(.navigateBack)) { _ in navigateBack() }
+            .onReceive(publisher(.navigateForward)) { _ in navigateForward() }
+            .onReceive(publisher(.printDocument)) { _ in printDocument() }
+    }
+
+    private func secondHalf<V: View>(_ content: V) -> some View {
+        content
+            .onReceive(publisher(.closeFile)) { _ in closeFile() }
+            .onReceive(publisher(.closeAllFiles)) { _ in closeAllFiles() }
+            .onReceive(publisher(.nextFile)) { _ in nextFile() }
+            .onReceive(publisher(.previousFile)) { _ in previousFile() }
     }
 }
 
@@ -3182,7 +3740,16 @@ struct LocalImageProvider: ImageProvider {
     @ViewBuilder
     private func content(for url: URL) -> some View {
         let resolved = resolve(url)
-        if resolved.scheme == "data" {
+        if resolved.scheme == MathSpec.scheme, let spec = MathSpec(url: resolved) {
+            // A `$$…$$` paragraph, rewritten by MathMarkdown.
+            MathDisplayView(spec: spec)
+        } else if resolved.scheme == HTMLImageSpec.scheme, let spec = HTMLImageSpec(url: resolved) {
+            // A raw `<img>` tag, rewritten by RawHTMLImages. Its `src` then
+            // behaves exactly like any other image URL: same resolution, same
+            // remote-image gate, same placeholders — only the size the tag
+            // asked for rides along.
+            htmlImage(spec, target: spec.resolvedURL(baseURL: baseURL))
+        } else if resolved.scheme == "data" {
             dataURIImage(resolved)
         } else if resolved.isFileURL {
             localFileImage(resolved)
@@ -3221,6 +3788,20 @@ struct LocalImageProvider: ImageProvider {
                 .frame(maxWidth: size.width > 0 ? size.width : nil)
         } else {
             missingImagePlaceholder(for: url.lastPathComponent)
+        }
+    }
+
+    @ViewBuilder
+    private func htmlImage(_ spec: HTMLImageSpec, target: URL) -> some View {
+        if target.isFileURL {
+            HTMLImageView(spec: spec, image: NSImage(contentsOf: target))
+        } else if target.scheme == "data" {
+            HTMLImageView(spec: spec, image: decodeDataURIImage(target))
+        } else if loadRemoteImages {
+            HTMLImageView(spec: spec, image: nil).frame(width: spec.width, height: spec.height)
+            RemoteImageView(url: target)
+        } else {
+            blockedRemoteImagePlaceholder(for: target)
         }
     }
 

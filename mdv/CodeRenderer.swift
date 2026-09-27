@@ -44,8 +44,7 @@ final class CodeRenderer {
         /// Resolve a fence info string (`go`, `js`, `Rust`, `sh`, …) to a
         /// supported language, or nil if we don't have a grammar for it.
         static func resolve(_ rawHint: String?) -> SupportedLanguage? {
-            guard let raw = rawHint?.lowercased() else { return nil }
-            let stripped = raw.split(separator: " ", maxSplits: 1).first.map(String.init) ?? raw
+            guard let stripped = CodeRenderer.fenceWord(rawHint) else { return nil }
             if let direct = SupportedLanguage(rawValue: stripped) { return direct }
             switch stripped {
             case "js", "jsx", "javascriptreact", "node": return .javascript
@@ -61,13 +60,22 @@ final class CodeRenderer {
         }
     }
 
+    /// First word of a fence info string, lowercased
+    /// (`Python title=foo.py` → `python`).
+    static func fenceWord(_ rawHint: String?) -> String? {
+        guard let raw = rawHint?.lowercased() else { return nil }
+        return raw.split(separator: " ", maxSplits: 1).first.map(String.init) ?? raw
+    }
+
     private let lock = NSLock()
     private var languages: [SupportedLanguage: Language] = [:]
     private var queries: [SupportedLanguage: Query?] = [:]  // nil sentinel: tried + failed; don't retry
 
     private struct CacheKey: Hashable {
         let lang: SupportedLanguage?     // nil → unknown / no grammar
+        let isDiff: Bool
         let themeID: String
+        let fontSize: CGFloat            // base × zoom × 0.85 — zoom is part of the key (SPEC C-05)
         let codeHash: Int
     }
     private var cache: [CacheKey: AttributedString] = [:]
@@ -76,13 +84,16 @@ final class CodeRenderer {
     /// Render a fenced code block. Always returns *something* — a plain
     /// monospaced AttributedString in theme `plain` color if no grammar
     /// matches, the query fails to load, or parsing errors out.
-    func render(code: String, languageHint: String?, theme: MDVTheme) -> AttributedString {
+    /// `scale` is the reader's zoom factor (R-30): fenced code follows it
+    /// like body text, at 0.85 × the scaled base size.
+    func render(code: String, languageHint: String?, theme: MDVTheme, scale: CGFloat = 1.0) -> AttributedString {
         let lang = SupportedLanguage.resolve(languageHint)
+        let isDiff = DiffHighlighter.fenceWords.contains(Self.fenceWord(languageHint) ?? "")
         let palette = theme.resolvedCodePalette
-        let fontSize = round(theme.baseFontSize * 0.85 * 100) / 100
+        let fontSize = round(theme.baseFontSize * scale * 0.85 * 100) / 100
 
         lock.lock()
-        let key = CacheKey(lang: lang, themeID: theme.id, codeHash: code.hashValue)
+        let key = CacheKey(lang: lang, isDiff: isDiff, themeID: theme.id, fontSize: fontSize, codeHash: code.hashValue)
         if let cached = cache[key] {
             lock.unlock()
             return cached
@@ -90,7 +101,10 @@ final class CodeRenderer {
         lock.unlock()
 
         let result: AttributedString
-        if let lang {
+        if isDiff {
+            result = DiffHighlighter.render(
+                code: code, palette: palette, hunkHeaderColor: theme.secondaryText, fontSize: fontSize)
+        } else if let lang {
             result = highlight(code: code, language: lang, palette: palette, fontSize: fontSize)
         } else {
             result = plainAttributedString(code: code, palette: palette, fontSize: fontSize)
@@ -204,16 +218,20 @@ final class CodeRenderer {
 /// `CodeRenderer` is fast enough to handle that without bouncing async.
 struct MDVCodeSyntaxHighlighter: CodeSyntaxHighlighter {
     let theme: MDVTheme
+    var scale: CGFloat = 1.0
+    /// Multiplier for this chrome's point paddings, mirroring
+    /// `markdownTheme(marginScale:)`.
+    var marginScale: CGFloat = 1.0
 
     func highlightCode(_ content: String, language: String?) -> Text {
-        let attr = CodeRenderer.shared.render(code: content, languageHint: language, theme: theme)
+        let attr = CodeRenderer.shared.render(code: content, languageHint: language, theme: theme, scale: scale)
         return Text(attr)
     }
 }
 
 extension CodeSyntaxHighlighter where Self == MDVCodeSyntaxHighlighter {
-    static func mdv(theme: MDVTheme) -> Self {
-        MDVCodeSyntaxHighlighter(theme: theme)
+    static func mdv(theme: MDVTheme, scale: CGFloat = 1.0) -> Self {
+        MDVCodeSyntaxHighlighter(theme: theme, scale: scale)
     }
 }
 
@@ -230,6 +248,14 @@ extension CodeSyntaxHighlighter where Self == MDVCodeSyntaxHighlighter {
 struct CodeBlockChrome: View {
     let configuration: CodeBlockConfiguration
     let theme: MDVTheme
+    var scale: CGFloat = 1.0
+    /// Multiplier for this chrome's point paddings, mirroring
+    /// `markdownTheme(marginScale:)`.
+    var marginScale: CGFloat = 1.0
+    /// Print rendering: force soft-wrap (paper can't scroll a horizontal
+    /// ScrollView — unwrapped long lines would silently truncate) and skip
+    /// the hover toolbar / context-menu machinery.
+    var forPrint: Bool = false
 
     @State private var hovering = false
     @State private var wrap = false
@@ -277,8 +303,16 @@ struct CodeBlockChrome: View {
                 content: configuration.content,
                 displayLanguage: displayLanguage,
                 theme: theme,
-                palette: palette
+                palette: palette,
+                scale: scale
             )
+        } else if forPrint {
+            VStack(alignment: .leading, spacing: 0) {
+                chromeRow
+                codeContent
+            }
+            .background(palette.background ?? theme.secondaryBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         } else {
             VStack(alignment: .leading, spacing: 0) {
                 chromeRow
@@ -299,31 +333,33 @@ struct CodeBlockChrome: View {
                 .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                 .foregroundColor(theme.tertiaryText)
                 .opacity(displayLanguage.isEmpty ? 0 : 0.85)
-                .padding(.leading, 14)
+                .padding(.leading, 14 * marginScale)
 
             Spacer(minLength: 8)
 
-            HStack(spacing: 2) {
-                iconButton(
-                    systemName: wrap ? "text.alignleft" : "text.append",
-                    tinted: wrap,
-                    help: wrap ? "Disable wrap" : "Wrap long lines"
-                ) { wrap.toggle() }
+            if !forPrint {
+                HStack(spacing: 2) {
+                    iconButton(
+                        systemName: wrap ? "text.alignleft" : "text.append",
+                        tinted: wrap,
+                        help: wrap ? "Disable wrap" : "Wrap long lines"
+                    ) { wrap.toggle() }
 
-                iconButton(
-                    systemName: copied ? "checkmark" : "doc.on.doc",
-                    tinted: copied,
-                    help: copied ? "Copied" : "Copy code"
-                ) { copy() }
+                    iconButton(
+                        systemName: copied ? "checkmark" : "doc.on.doc",
+                        tinted: copied,
+                        help: copied ? "Copied" : "Copy code"
+                    ) { copy() }
+                }
+                .padding(.trailing, 6 * marginScale)
+                .opacity(hovering ? 1 : 0)
+                // Always reserve the toolbar's space so the label doesn't
+                // jitter when hover toggles. The opacity transition stays
+                // smooth without a layout shift.
             }
-            .padding(.trailing, 6)
-            .opacity(hovering ? 1 : 0)
-            // Always reserve the toolbar's space so the label doesn't
-            // jitter when hover toggles. The opacity transition stays
-            // smooth without a layout shift.
         }
-        .frame(height: 26)
-        .padding(.top, 4)
+        .frame(height: 26 * marginScale)
+        .padding(.top, 4 * marginScale)
         .animation(.easeInOut(duration: 0.12), value: hovering)
         .animation(.easeInOut(duration: 0.18), value: copied)
         .animation(.easeInOut(duration: 0.18), value: wrap)
@@ -333,22 +369,22 @@ struct CodeBlockChrome: View {
 
     @ViewBuilder
     private var codeContent: some View {
-        if wrap {
+        if wrap || forPrint {
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
                 .relativeLineSpacing(.em(0.225))
-                .padding(.horizontal, 16)
-                .padding(.top, 4)
-                .padding(.bottom, 14)
+                .padding(.horizontal, 16 * marginScale)
+                .padding(.top, 4 * marginScale)
+                .padding(.bottom, 14 * marginScale)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             ScrollView(.horizontal, showsIndicators: false) {
                 configuration.label
                     .fixedSize(horizontal: false, vertical: true)
                     .relativeLineSpacing(.em(0.225))
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-                    .padding(.bottom, 14)
+                    .padding(.horizontal, 16 * marginScale)
+                    .padding(.top, 4 * marginScale)
+                    .padding(.bottom, 14 * marginScale)
             }
         }
     }

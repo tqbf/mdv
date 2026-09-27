@@ -18,5 +18,6 @@ Each subdirectory holds a grammar's parser source (parser.c, optional scanner.c/
 
 - YAML and TOML had their scanner `#include <tree_sitter/parser.h>` patched to quoted form so the include resolves to the local `tree_sitter/parser.h` shipped beside each scanner. No other source changes.
 - YAML's `scanner.cc` `#include`s `schema.generated.cc` directly; that companion file lives next to scanner.cc but is **not** added as a separate compile unit in the pbxproj.
+- The generated scanners do a few `size_t` → `unsigned`/`uint32_t` narrowings (python, yaml) that `-Wshorten-64-to-32` flags. Rather than edit generated sources, the `CGrammars` target in the root `Package.swift` sets `cSettings: [.unsafeFlags(["-Wno-shorten-64-to-32"])]`.
 - YAML had no `queries/highlights.scm` upstream; we vendored `runtime/queries/yaml/highlights.scm` from nvim-treesitter.
 - Bumping a grammar: clone fresh, re-copy `src/` and `queries/highlights.scm` (or nvim-treesitter equivalent), reapply the `<…>` → `"…"` patch where needed, update the row above.

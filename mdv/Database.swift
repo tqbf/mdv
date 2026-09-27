@@ -176,13 +176,21 @@ final class Database {
         // shape; this block only fires for legacy rows that need fixups
         // beyond what additive DDL covers.
         let version = Int(scalarString(sql: "SELECT value FROM meta WHERE key = 'schema_version';") ?? "0") ?? 0
+        guard version < 4 else { return }
+
+        // One transaction per migration run, version bump included (SPEC
+        // §3.3, I-007): a crash mid-way leaves the previous schema *and* the
+        // previous version, so the next launch re-runs it cleanly instead of
+        // logging a failed ALTER against a half-applied schema.
+        guard exec("BEGIN IMMEDIATE;") else { return }
+        var ok = true
 
         // v1→v2: an earlier dev build of the bookmarks branch shipped a
         // schema with `path UNIQUE` and no anchor columns. Real users on
         // main never had it, so we drop+recreate without preserving rows.
         if version < 2 {
-            exec("DROP TABLE IF EXISTS bookmarks;")
-            exec("""
+            ok = exec("DROP TABLE IF EXISTS bookmarks;") && ok
+            ok = exec("""
             CREATE TABLE bookmarks (
                 id                INTEGER PRIMARY KEY,
                 path              TEXT NOT NULL,
@@ -192,8 +200,8 @@ final class Database {
                 block_index       INTEGER NOT NULL DEFAULT 0,
                 block_fingerprint TEXT NOT NULL DEFAULT ''
             );
-            """)
-            exec("CREATE INDEX IF NOT EXISTS bookmarks_sort ON bookmarks(sort_order);")
+            """) && ok
+            ok = exec("CREATE INDEX IF NOT EXISTS bookmarks_sort ON bookmarks(sort_order);") && ok
         }
 
         // v2→v3: scroll_positions added (handled by CREATE IF NOT EXISTS
@@ -204,11 +212,16 @@ final class Database {
         // need an ALTER TABLE. SQLite's ALTER TABLE ... ADD COLUMN is cheap
         // (metadata-only) and supported since 3.x.
         if version == 3 {
-            exec("ALTER TABLE scroll_positions ADD COLUMN file_mtime INTEGER NOT NULL DEFAULT 0;")
+            ok = exec("ALTER TABLE scroll_positions ADD COLUMN file_mtime INTEGER NOT NULL DEFAULT 0;") && ok
         }
 
-        if version < 4 {
-            exec("INSERT INTO meta(key, value) VALUES ('schema_version', '4') ON CONFLICT(key) DO UPDATE SET value = '4';")
+        ok = exec("INSERT INTO meta(key, value) VALUES ('schema_version', '4') ON CONFLICT(key) DO UPDATE SET value = '4';") && ok
+
+        if ok {
+            exec("COMMIT;")
+        } else {
+            NSLog("[mdv] schema migration from v%d failed; rolled back", version)
+            exec("ROLLBACK;")
         }
     }
 
@@ -392,6 +405,33 @@ final class Database {
         }
     }
 
+    /// Delete every `articles` row whose path is not in `paths` (SPEC
+    /// R-26: the search population is exactly the current history). Runs
+    /// on the serial queue ahead of any reindex queued after it.
+    func pruneIndex(keeping paths: [String]) {
+        queue.async { [weak self] in
+            guard let self, let db = self.db else { return }
+            let keep = Set(paths)
+            var stale: [String] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT path FROM articles;", -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    let p = String(cString: sqlite3_column_text(stmt, 0))
+                    if !keep.contains(p) { stale.append(p) }
+                }
+            }
+            sqlite3_finalize(stmt)
+            for p in stale {
+                var del: OpaquePointer?
+                if sqlite3_prepare_v2(db, "DELETE FROM articles WHERE path = ?;", -1, &del, nil) == SQLITE_OK {
+                    sqlite3_bind_text(del, 1, p, -1, SQLITE_TRANSIENT)
+                    _ = sqlite3_step(del)
+                }
+                sqlite3_finalize(del)
+            }
+        }
+    }
+
     func removeFile(at path: String) {
         queue.async { [weak self] in
             guard let self, let db = self.db else { return }
@@ -526,15 +566,18 @@ final class Database {
 
     // MARK: - Helpers
 
-    private func exec(_ sql: String) {
-        guard let db = db else { return }
+    @discardableResult
+    private func exec(_ sql: String) -> Bool {
+        guard let db = db else { return false }
         var err: UnsafeMutablePointer<CChar>?
         if sqlite3_exec(db, sql, nil, nil, &err) != SQLITE_OK {
             if let err {
                 NSLog("[mdv] sqlite exec error: %s", err)
                 sqlite3_free(err)
             }
+            return false
         }
+        return true
     }
 
     private func scalarInt64(sql: String, bindText1: String) -> Int64? {

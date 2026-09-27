@@ -14,11 +14,19 @@ history sidebar with the rest.
   tree-sitter grammar** (bash, c, go, javascript, python, ruby,
   rust, toml, yaml). Use this to verify the syntax highlighter and
   the per-theme code palette.
+- [diff.md](diff.md) — `diff` and `patch` fenced blocks: a two-file
+  git diff, a header-less snippet, and a removed line that looks like
+  a `---` file header. Verifies diff tinting per theme.
 - [tables.md](tables.md) — alignment, long cells, narrow cells, the
   full GFM table corner cases
 - [images.md](images.md) — relative paths, absolute paths, missing
   references, and a couple of inline data: URIs. Verifies the
   `LocalImageProvider`.
+- [raw-html-images.md](raw-html-images.md) — raw `<img>` tags: a sized
+  header image, width/height/neither, single-quoted and bare attribute
+  values, one inline in a sentence, a missing file, a remote source, and
+  the fences and inline code that must keep their HTML literal. Verifies
+  `RawHTMLImages` and the sizing shared by the screen and print.
 - [links.md](links.md) — every link shape: md-to-md (navigates
   in-app), URL (opens in browser), mailto, fragment, broken refs.
   Verifies the `OpenURLAction` interception.
@@ -28,11 +36,35 @@ history sidebar with the rest.
 - [toc-stress.md](toc-stress.md) — many headings at every level so
   you can exercise the TOC pane, the spyglass-collapse search, and
   the "On this page" affordances.
+- [math.md](math.md) — `$…$` and `$$…$$` LaTeX: inline, display,
+  environments (cases/matrices/aligned), math inside lists, quotes,
+  tables and headings, plus the dollar signs that must stay literal
+  (prices, `\$`, code). Verifies `MathMarkdown` + SwiftMath.
 - [thematic-break.md](thematic-break.md) — every CommonMark
   thematic-break variant (`---`, `----`, `* * *`, `_ _ _`, `- - -`,
   setext H2) plus inline dash sequences that must *not* become rules.
   Useful for verifying thematic-break rendering with View → Smart
   Typography on and off.
+- [gantt.md](gantt.md) — a Mermaid `gantt` diagram. Rendered via
+  WKWebView + bundled mermaid.js (BeautifulMermaid does not support
+  this type). Use it to verify fallback rendering, light/dark theme
+  switching, and the source-view toggle.
+- [mermaid-web-fallback.md](mermaid-web-fallback.md) — one of every
+  other diagram type that goes through the WKWebView fallback (pie,
+  timeline, mindmap, journey, quadrant chart, requirement diagram)
+  plus a flowchart with a `%%{init}%%` directive and a `%%` comment
+  before the keyword to verify the native dispatcher still finds
+  it. If anything in here renders as the "could not be rendered"
+  plate, the type-detector is at fault.
+- [frontmatter.md](frontmatter.md) — a YAML metadata header at the top
+  of a file, with the folded scalars, sequences, and nested mappings
+  real headers use. Three companions cover the rest of the family:
+  [frontmatter-ellipsis-close.md](frontmatter-ellipsis-close.md) (`...`
+  closer, blank line inside the header),
+  [frontmatter-toml.md](frontmatter-toml.md) (`+++` fences, multi-line
+  array), and [frontmatter-negative.md](frontmatter-negative.md), which
+  opens with a genuine thematic break and must keep rendering as
+  ordinary prose.
 
 ## Quick checklist
 
@@ -48,7 +80,12 @@ history sidebar with the rest.
 5. **Bookmarks** — ⌘D in any block adds a bookmark. ⌘1–⌘9 jumps.
 6. **Images** — see [images.md](images.md). The relative one should
    render; the broken reference should show a "image not found"
-   placeholder.
+   placeholder. Raw `<img>` tags are [raw-html-images.md](raw-html-images.md).
+7. **Print** — ⌘P (or the panel's PDF dropdown) on
+   [math.md](math.md), [gantt.md](gantt.md) and
+   [raw-html-images.md](raw-html-images.md): formulas and diagrams should
+   come out as vector glyphs, not rasters, and the printed page should lay
+   out like the window.
 
 ## Notes
 
