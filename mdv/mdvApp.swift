@@ -73,6 +73,12 @@ struct mdvApp: App {
                     }
                 }
             }
+            CommandGroup(replacing: .printItem) {
+                Button("Print…") {
+                    NotificationCenter.default.post(name: .printDocument, object: nil)
+                }
+                .keyboardShortcut("p", modifiers: .command)
+            }
             CommandGroup(after: .pasteboard) {
                 Divider()
                 Button("Find…") {
@@ -216,4 +222,5 @@ extension Notification.Name {
     static let navigateBack = Notification.Name("navigateBack")
     static let navigateForward = Notification.Name("navigateForward")
     static let toggleSidebar = Notification.Name("toggleSidebar")
+    static let printDocument = Notification.Name("printDocument")
 }

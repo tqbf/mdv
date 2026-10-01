@@ -230,6 +230,10 @@ extension CodeSyntaxHighlighter where Self == MDVCodeSyntaxHighlighter {
 struct CodeBlockChrome: View {
     let configuration: CodeBlockConfiguration
     let theme: MDVTheme
+    /// Print rendering: force soft-wrap (paper can't scroll a horizontal
+    /// ScrollView — unwrapped long lines would silently truncate) and skip
+    /// the hover toolbar / context-menu machinery.
+    var forPrint: Bool = false
 
     @State private var hovering = false
     @State private var wrap = false
@@ -279,6 +283,13 @@ struct CodeBlockChrome: View {
                 theme: theme,
                 palette: palette
             )
+        } else if forPrint {
+            VStack(alignment: .leading, spacing: 0) {
+                chromeRow
+                codeContent
+            }
+            .background(palette.background ?? theme.secondaryBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
         } else {
             VStack(alignment: .leading, spacing: 0) {
                 chromeRow
@@ -303,24 +314,26 @@ struct CodeBlockChrome: View {
 
             Spacer(minLength: 8)
 
-            HStack(spacing: 2) {
-                iconButton(
-                    systemName: wrap ? "text.alignleft" : "text.append",
-                    tinted: wrap,
-                    help: wrap ? "Disable wrap" : "Wrap long lines"
-                ) { wrap.toggle() }
+            if !forPrint {
+                HStack(spacing: 2) {
+                    iconButton(
+                        systemName: wrap ? "text.alignleft" : "text.append",
+                        tinted: wrap,
+                        help: wrap ? "Disable wrap" : "Wrap long lines"
+                    ) { wrap.toggle() }
 
-                iconButton(
-                    systemName: copied ? "checkmark" : "doc.on.doc",
-                    tinted: copied,
-                    help: copied ? "Copied" : "Copy code"
-                ) { copy() }
+                    iconButton(
+                        systemName: copied ? "checkmark" : "doc.on.doc",
+                        tinted: copied,
+                        help: copied ? "Copied" : "Copy code"
+                    ) { copy() }
+                }
+                .padding(.trailing, 6)
+                .opacity(hovering ? 1 : 0)
+                // Always reserve the toolbar's space so the label doesn't
+                // jitter when hover toggles. The opacity transition stays
+                // smooth without a layout shift.
             }
-            .padding(.trailing, 6)
-            .opacity(hovering ? 1 : 0)
-            // Always reserve the toolbar's space so the label doesn't
-            // jitter when hover toggles. The opacity transition stays
-            // smooth without a layout shift.
         }
         .frame(height: 26)
         .padding(.top, 4)
@@ -333,7 +346,7 @@ struct CodeBlockChrome: View {
 
     @ViewBuilder
     private var codeContent: some View {
-        if wrap {
+        if wrap || forPrint {
             configuration.label
                 .fixedSize(horizontal: false, vertical: true)
                 .relativeLineSpacing(.em(0.225))

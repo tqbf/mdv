@@ -380,7 +380,8 @@ struct ContentView: View {
             forgetExternalEditor: { editorAppPath = "" },
             navigateBack: goBack,
             navigateForward: goForward,
-            toggleSidebar: toggleSidebar
+            toggleSidebar: toggleSidebar,
+            printDocument: printCurrentDocument
         ))
         .onOpenURL { url in
             loadFile(url)
@@ -1438,6 +1439,27 @@ struct ContentView: View {
         }
         flashClearWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+    }
+
+    // MARK: - Print
+
+    /// ⌘P / File > Print. Always prints in High Contrast (the light,
+    /// GitHub-style theme) regardless of the on-screen theme — classic
+    /// ink-friendly print behavior; the screen is untouched.
+    private func printCurrentDocument() {
+        guard !rawMarkdown.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        let printTheme = MDVTheme.highContrast
+        PrintController.printDocument(PrintController.Request(
+            blocks: blocks,
+            jobTitle: selectedEntry?.filename ?? "mdv",
+            theme: printTheme,
+            baseURL: currentDocumentDirectory,
+            smartTypography: userSmartTypography && printTheme.smartTypographyAllowed,
+            window: NSApp.keyWindow
+        ))
     }
 
     // MARK: - Table of Contents
@@ -3045,6 +3067,7 @@ private struct NotificationHandlers: ViewModifier {
     let navigateBack: () -> Void
     let navigateForward: () -> Void
     let toggleSidebar: () -> Void
+    let printDocument: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -3067,6 +3090,7 @@ private struct NotificationHandlers: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: .forgetExternalEditor)) { _ in forgetExternalEditor() }
             .onReceive(NotificationCenter.default.publisher(for: .navigateBack)) { _ in navigateBack() }
             .onReceive(NotificationCenter.default.publisher(for: .navigateForward)) { _ in navigateForward() }
+            .onReceive(NotificationCenter.default.publisher(for: .printDocument)) { _ in printDocument() }
     }
 }
 

@@ -414,7 +414,11 @@ extension MDVTheme {
     /// Heading sizes are em-relative so they scale automatically with body;
     /// per-element point spacing is left as-is to match browser-style zoom
     /// (text grows but the column doesn't change shape).
-    func markdownTheme(scale: CGFloat) -> Theme {
+    ///
+    /// `forPrint` reaches only the code-block chrome: printed code must
+    /// soft-wrap (no horizontal ScrollView on paper) and drops the hover
+    /// toolbar.
+    func markdownTheme(scale: CGFloat, forPrint: Bool = false) -> Theme {
         let bg = self.background
         let sbg = self.secondaryBackground
         let txt = self.text
@@ -554,7 +558,7 @@ extension MDVTheme {
                 // menu. Font + colors are set inside MDVCodeSyntaxHighlighter —
                 // the configuration.label here is the Text we produced and we
                 // don't apply markdownTextStyle font/size on top of it.
-                CodeBlockChrome(configuration: configuration, theme: self)
+                CodeBlockChrome(configuration: configuration, theme: self, forPrint: forPrint)
                     .markdownMargin(top: 0, bottom: 16)
             }
             .listItem { configuration in
