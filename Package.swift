@@ -6,14 +6,18 @@ let package = Package(
     platforms: [.macOS(.v13)],
     dependencies: [
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.0.2"),
+        .package(url: "https://github.com/swiftlang/swift-cmark", from: "0.7.1"),
         .package(url: "https://github.com/ChimeHQ/SwiftTreeSitter", from: "0.8.0"),
         .package(url: "https://github.com/lukilabs/beautiful-mermaid-swift", from: "1.0.4"),
     ],
     targets: [
+        .testTarget(name: "mdvTests", dependencies: ["mdv"], path: "Tests/mdvTests"),
         .executableTarget(
             name: "mdv",
             dependencies: [
                 "CGrammars",
+                .product(name: "cmark-gfm", package: "swift-cmark"),
+                .product(name: "cmark-gfm-extensions", package: "swift-cmark"),
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 .product(name: "SwiftTreeSitter", package: "SwiftTreeSitter"),
                 .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),

@@ -8,7 +8,7 @@ of an evening while yelling at people about zoning reform.
 
 ## Features
 
-* It renders Markdown. This is a totally solved problem in computer science and I used [gonzalezreal/swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) to do it here.
+* It renders Markdown using [cmark-gfm](https://github.com/swiftlang/swift-cmark) and the native macOS text system. Drag to select arbitrary text across the document; ⌘A selects everything and ⌘C copies it.
 
 * It keeps a durable history of the Markdown files you've viewed.
 
