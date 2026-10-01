@@ -59,6 +59,9 @@ struct DocumentScrollKeys: NSViewRepresentable {
                 return event
             }
             if window.firstResponder is NSTextField { return event }
+            if let selection = window.firstResponder as? DocumentSelection.SelectionView, selection.hasSelection {
+                return event
+            }
 
             let clipView = scrollView.contentView
             let down = event.keyCode == 125

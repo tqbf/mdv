@@ -10,6 +10,7 @@ let package = Package(
         .package(url: "https://github.com/lukilabs/beautiful-mermaid-swift", from: "1.0.4"),
     ],
     targets: [
+        .testTarget(name: "mdvTests", dependencies: ["mdv"], path: "Tests/mdvTests"),
         .executableTarget(
             name: "mdv",
             dependencies: [

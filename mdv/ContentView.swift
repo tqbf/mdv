@@ -24,15 +24,7 @@ struct ContentView: View {
 
     @State private var selectedEntry: HistoryEntry?
 
-    // Source of truth for the open document. `ParsedDocument` parses
-    // `blocks` and `tocHeadings` once on construction; `rawMarkdown`
-    // below is a thin getter/setter over `document.raw` so every
-    // existing call site keeps the same shape. Before this, `blocks`
-    // and `tocHeadings` were computed properties that re-split the
-    // entire raw string on every access — and `.modifier(BlockTextSelection(
-    // isHeading: isHeadingBlock(idx)))` per row meant a scroll tick did
-    // O(N) full re-parses, pegging the main thread on
-    // GraphHost.flushTransactions.
+    // Cache block boundaries and heading anchors when the source changes.
     @State private var document: ParsedDocument = .empty
     private var rawMarkdown: String {
         get { document.raw }
@@ -133,19 +125,6 @@ struct ContentView: View {
     /// visible block, which is what we anchor a new bookmark to.
     @State private var visibleBlocks: Set<Int> = []
 
-    // Heading-click copy. Clicking a heading copies that heading's full
-    // section (heading + content down to the next same-or-higher-level
-    // heading) as raw markdown source. `flashingBlocks` paints a brief
-    // accent fill on each block in the just-copied section as visual
-    // confirmation, then auto-clears. Normal click-drag still selects
-    // text via `.textSelection(.enabled)` — block-level selection is
-    // intentionally gone (annoying in practice when you actually wanted
-    // to grab a phrase).
-    @State private var flashingBlocks: Set<Int> = []
-    /// Workitem for the flash-clear timer, kept around so re-clicks can
-    /// cancel and restart cleanly (otherwise rapid clicks would race the
-    /// clear of an earlier flash).
-    @State private var flashClearWork: DispatchWorkItem? = nil
     /// Block the mouse is currently hovering. Drives the bookmark-anchor
     /// indicator (subtle accent stripe + tint) so the user can see what
     /// ⌘D will bookmark — there's no caret in a viewer.
@@ -463,10 +442,6 @@ struct ContentView: View {
         }
         .onChange(of: rawMarkdown) { _ in
             if isSearching { recomputeMatches() }
-            // Drop any in-progress copy flash on doc swap — block indices
-            // no longer refer to the same content.
-            flashClearWork?.cancel()
-            flashingBlocks = []
             // Visible-block tracking carries indices from the leaving doc.
             // We can't just `removeAll()`: SwiftUI's `ForEach(id: \.offset)`
             // keeps blocks with the same offset mounted across a doc swap,
@@ -1319,7 +1294,8 @@ struct ContentView: View {
                         LazyVStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { (idx, block) in
                                 blockView(block: block, idx: idx)
-                                    .modifier(BlockTextSelection(isHeading: isHeadingBlock(idx)))
+                                    .textSelection(.enabled)
+                                    .background(DocumentSelectionBlock(index: idx))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(
@@ -1330,25 +1306,11 @@ struct ContentView: View {
                                             .animation(.easeOut(duration: 0.18), value: isSearching)
                                             .animation(.easeOut(duration: 0.12), value: hoveredBlock)
                                     )
-                                    .background(
-                                        // Brief flash after a heading-click copy: the
-                                        // copied section's blocks paint with the accent
-                                        // tint for ~0.6s, then clear. Gives the user
-                                        // confirmation that the click did something
-                                        // without a popup or toast.
-                                        Group {
-                                            if flashingBlocks.contains(idx) {
-                                                RoundedRectangle(cornerRadius: 4)
-                                                    .fill(themes.current.accent.opacity(0.18))
-                                            }
-                                        }
-                                        .animation(.easeOut(duration: 0.18), value: flashingBlocks)
-                                    )
                                     .overlay(alignment: .leading) {
                                         // Accent stripe along the left edge of the hovered block —
                                         // this is the "you will bookmark here" affordance, since a
                                         // read-only viewer has no insertion caret.
-                                        if hoveredBlock == idx && highlightColor(forBlock: idx) == .clear && !flashingBlocks.contains(idx) {
+                                        if hoveredBlock == idx && highlightColor(forBlock: idx) == .clear {
                                             Rectangle()
                                                 .fill(themes.current.accent)
                                                 .frame(width: 2)
@@ -1364,26 +1326,8 @@ struct ContentView: View {
                                         if hoveredBlock == idx { hoveredBlock = nil }
                                     }
                                     .onHover { inside in
-                                        if inside {
-                                            hoveredBlock = idx
-                                            if isHeadingBlock(idx) {
-                                                NSCursor.pointingHand.push()
-                                            }
-                                        } else {
-                                            if hoveredBlock == idx { hoveredBlock = nil }
-                                            if isHeadingBlock(idx) {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                    }
-                                    .onTapGesture {
-                                        // Heading single-click → copy the whole section
-                                        // as markdown to the pasteboard. Non-heading
-                                        // blocks: ignore — `.textSelection(.enabled)`
-                                        // owns drag-to-select for prose.
-                                        if isHeadingBlock(idx) {
-                                            copySection(headingAt: idx)
-                                        }
+                                        if inside { hoveredBlock = idx }
+                                        else if hoveredBlock == idx { hoveredBlock = nil }
                                     }
                             }
                         }
@@ -1393,6 +1337,13 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity,
                                alignment: themes.current.articleMaxWidth == nil ? .leading : .center)
                         .background(DocumentScrollKeys())
+                        .overlay(DocumentSelection(
+                            blocks: blocks,
+                            identity: selectedEntry?.path ?? "",
+                            smartTypography: smartTypographyEnabled,
+                            openURL: OpenURLAction { url in handleLinkClick(url) },
+                            scrollToBlock: { index in proxy.scrollTo("block-\(index)", anchor: .center) }
+                        ))
                     }
                     .onChange(of: currentMatchIndex) { _ in
                         scrollToCurrentMatch(proxy: proxy)
@@ -1498,53 +1449,6 @@ struct ContentView: View {
     }
 
     private var blocks: [String] { document.blocks }
-
-    // MARK: - Section copy
-
-    /// True if the block at `idx` is an ATX heading (`#`, `##`, `###`).
-    private func isHeadingBlock(_ idx: Int) -> Bool {
-        tocHeadings.contains(where: { $0.blockIndex == idx })
-    }
-
-    /// Range of blocks that make up the section starting at the heading
-    /// in `idx` — heading included, ending at the next heading of the
-    /// *same or higher* level (or end of document). Mirrors how readers
-    /// think about "this section": H2 ends at the next H2 or H1, not at
-    /// the next H3.
-    private func sectionRange(forHeadingAt idx: Int) -> Range<Int> {
-        guard let h = tocHeadings.first(where: { $0.blockIndex == idx }) else {
-            return idx..<idx + 1
-        }
-        let endIdx = tocHeadings.first(where: {
-            $0.blockIndex > idx && $0.level <= h.level
-        })?.blockIndex ?? blocks.count
-        return idx..<endIdx
-    }
-
-    /// One-shot: copy the section starting at `idx` to the pasteboard
-    /// (joined by `\n\n` so it round-trips back into another markdown
-    /// doc), then briefly paint the section's blocks with the accent tint
-    /// as visual confirmation. The flash auto-clears after 0.6s; a
-    /// re-click cancels and restarts the clear so rapid copies don't
-    /// race each other.
-    private func copySection(headingAt idx: Int) {
-        let span = sectionRange(forHeadingAt: idx)
-        let text = span.compactMap { i in
-            i < blocks.count ? blocks[i] : nil
-        }.joined(separator: "\n\n")
-        guard !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-
-        // Visual confirmation flash.
-        flashClearWork?.cancel()
-        flashingBlocks = Set(span)
-        let work = DispatchWorkItem {
-            flashingBlocks = []
-        }
-        flashClearWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
-    }
 
     // MARK: - Table of Contents
 
@@ -3005,24 +2909,6 @@ fileprivate func stripInlineMarkdown(_ s: String) -> String {
         options: .regularExpression
     )
     return out.trimmingCharacters(in: .whitespaces)
-}
-
-/// Per-block text-selection gating. Prose blocks have `.enabled` so the
-/// user can drag-copy phrases as normal. Heading blocks have `.disabled`
-/// so the parent `.textSelection(.enabled)` doesn't intercept clicks —
-/// otherwise the heading-single-click copy handler never fires. Lifted
-/// to a standalone modifier because inlining the conditional inside the
-/// `ForEach` blew the SwiftUI type-checker's expression-complexity
-/// budget for the surrounding view.
-private struct BlockTextSelection: ViewModifier {
-    let isHeading: Bool
-    func body(content: Content) -> some View {
-        if isHeading {
-            content.textSelection(.disabled)
-        } else {
-            content.textSelection(.enabled)
-        }
-    }
 }
 
 // MARK: - Find text field

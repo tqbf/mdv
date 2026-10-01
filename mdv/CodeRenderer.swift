@@ -281,7 +281,7 @@ struct CodeBlockChrome: View {
             )
         } else {
             VStack(alignment: .leading, spacing: 0) {
-                chromeRow
+                chromeRow.textSelection(.disabled)
                 codeContent
             }
             .background(palette.background ?? theme.secondaryBackground)

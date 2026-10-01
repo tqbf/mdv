@@ -77,7 +77,7 @@ struct MermaidCodeBlockChrome: View {
     // top-left, hover-revealed toolbar top-right, syntax-highlighted content.
     private var sourceChrome: some View {
         VStack(alignment: .leading, spacing: 0) {
-            sourceChromeRow
+            sourceChromeRow.textSelection(.disabled)
             sourceContent
         }
         .background(palette.background ?? theme.secondaryBackground)
