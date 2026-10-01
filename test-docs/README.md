@@ -25,6 +25,10 @@ history sidebar with the rest.
 - [prose.md](prose.md) — long-form text designed for the reading
   themes (Sevilla, Solarized Light). Try toggling between Sevilla
   and Charcoal to see typography hierarchies.
+- [scroll-landing.md](scroll-landing.md) — short sections first and
+  long list sections later, so lazy layout underestimates how far
+  down the late headings sit. Open it fresh, click "6. Open questions"
+  in the TOC, and check where the viewer lands.
 - [toc-stress.md](toc-stress.md) — many headings at every level so
   you can exercise the TOC pane, the spyglass-collapse search, and
   the "On this page" affordances.

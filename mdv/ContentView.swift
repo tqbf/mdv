@@ -146,6 +146,10 @@ struct ContentView: View {
     /// When non-nil, the markdown view scrolls to this block on next layout.
     /// Used after loading a file via a bookmark / ⌘0 to land on the anchor.
     @State private var pendingAnchorBlock: Int? = nil
+    /// Block `settleScroll` is steering to the top of the viewport; while
+    /// set, that block reports its position into `settleProbe`.
+    @State private var settleTarget: Int? = nil
+    @State private var settleProbe = ScrollSettleProbe()
     /// Set by jumpTo(...) when the file is being reloaded; consumed once the
     /// new document's blocks are computed. We can't resolve the fingerprint
     /// against the document until rawMarkdown updates.
@@ -1251,6 +1255,16 @@ struct ContentView: View {
                                         }
                                     }
                                     .contentShape(Rectangle())
+                                    .background {
+                                        if idx == settleTarget {
+                                            GeometryReader { geo in
+                                                Color.clear.preference(
+                                                    key: SettleTopKey.self,
+                                                    value: geo.frame(in: .named(ScrollSettleProbe.coordinateSpace)).minY
+                                                )
+                                            }
+                                        }
+                                    }
                                     .id("block-\(idx)")
                                     .onAppear { visibleBlocks.insert(idx) }
                                     .onDisappear {
@@ -1291,11 +1305,11 @@ struct ContentView: View {
                     .onChange(of: currentMatchIndex) { _ in
                         scrollToCurrentMatch(proxy: proxy)
                     }
+                    .coordinateSpace(name: ScrollSettleProbe.coordinateSpace)
+                    .onPreferenceChange(SettleTopKey.self) { settleProbe.top = $0 }
                     .onChange(of: tocScrollTrigger) { newValue in
                         guard let target = newValue else { return }
-                        withAnimation(.easeOut(duration: 0.25)) {
-                            proxy.scrollTo("block-\(target)", anchor: .top)
-                        }
+                        settleScroll(to: target, proxy: proxy)
                         DispatchQueue.main.async {
                             tocScrollTrigger = nil
                         }
@@ -1305,9 +1319,7 @@ struct ContentView: View {
                         // The blocks may not all be laid out yet on first paint —
                         // give SwiftUI a tick before scrolling.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            withAnimation(.easeOut(duration: 0.25)) {
-                                proxy.scrollTo("block-\(target)", anchor: .top)
-                            }
+                            settleScroll(to: target, proxy: proxy)
                             pendingAnchorBlock = nil
                         }
                     }
@@ -2361,6 +2373,53 @@ struct ContentView: View {
         withAnimation(.easeOut(duration: 0.2)) {
             proxy.scrollTo("block-\(match.blockIndex)", anchor: .center)
         }
+    }
+
+    /// Scrolls the document so `block` sits at the top of the viewport.
+    ///
+    /// LazyVStack sizes blocks it has never laid out by estimate, so a
+    /// scrollTo into unvisited content lands where the estimate says, and
+    /// every later layout pass moves it. An animated scrollTo happens to be
+    /// re-aimed on each pass, but takes over a second and tours the wrong
+    /// sections on the way; a plain one is one-shot and stays wrong. So jump
+    /// without animation, read where the block really is (it reports its
+    /// top edge while it is `settleTarget`), and jump again until it holds.
+    private func settleScroll(to block: Int, proxy: ScrollViewProxy) {
+        if settleTarget != block { settleProbe.top = nil }
+        settleProbe.generation += 1
+        let generation = settleProbe.generation
+        settleTarget = block
+        proxy.scrollTo("block-\(block)", anchor: .top)
+        var ticks = 0, passes = 1
+        var lastTop: CGFloat?
+        var atTopRun = 0, unchangedRun = 0
+
+        // Done once the block reads at the top on two ticks in a row, or
+        // reads the same on three (near the end of the document it cannot
+        // reach the top). Gives up after 40 ticks (~1.2s) or 12 passes.
+        func tick() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+                guard settleProbe.generation == generation else { return }
+                ticks += 1
+                let top = settleProbe.top
+                let atTop = top.map { abs($0) <= 0.5 } ?? false
+                var unchanged = false
+                if let top, let lastTop { unchanged = abs(top - lastTop) <= 0.5 }
+                atTopRun = atTop ? atTopRun + 1 : 0
+                unchangedRun = unchanged ? unchangedRun + 1 : 0
+                lastTop = top
+                if atTopRun >= 2 || unchangedRun >= 2 || ticks >= 40 || (!atTop && passes >= 12) {
+                    settleTarget = nil
+                    return
+                }
+                if !atTop {
+                    passes += 1
+                    proxy.scrollTo("block-\(block)", anchor: .top)
+                }
+                tick()
+            }
+        }
+        tick()
     }
 
     private var emptyState: some View {
