@@ -1286,6 +1286,7 @@ struct ContentView: View {
                         .frame(maxWidth: themes.current.articleMaxWidth ?? .infinity, alignment: .leading)
                         .frame(maxWidth: .infinity,
                                alignment: themes.current.articleMaxWidth == nil ? .leading : .center)
+                        .background(DocumentScrollKeys())
                     }
                     .onChange(of: currentMatchIndex) { _ in
                         scrollToCurrentMatch(proxy: proxy)
