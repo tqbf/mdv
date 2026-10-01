@@ -17,13 +17,6 @@ A "totally solved problem in computer science" rendered into a window. Here is w
 - Click a link to a sibling `.md` in the same directory — it loads. Click an `https://` link — it goes to your browser, where it belongs.
 - `#fragment` links scroll to the matching heading. `[See above](#earlier-section)` actually does that.
 
-## Selecting and copying
-
-- Drag to select any text, including selections across headings, paragraphs, lists, tables, and code. Double-click selects a word; Shift-click or Shift-arrow extends the selection.
-- **⌘A** selects the entire document, including text offscreen. **⌘C** copies the selected rendered text. The viewer remains read-only.
-- Clicking a heading does not copy anything.
-- Right-click code for **Copy Code**. Right-click a diagram to show its source, change its style, copy its code, or export a PNG.
-
 ## Find
 
 - **⌘F** — find in the current document. The inline kind, with highlights and a counter, like every text app shipped after 1998.

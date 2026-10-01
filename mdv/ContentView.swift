@@ -24,7 +24,15 @@ struct ContentView: View {
 
     @State private var selectedEntry: HistoryEntry?
 
-    // Parse block boundaries and heading anchors once when the source changes.
+    // Source of truth for the open document. `ParsedDocument` parses
+    // `blocks` and `tocHeadings` once on construction; `rawMarkdown`
+    // below is a thin getter/setter over `document.raw` so every
+    // existing call site keeps the same shape. Before this, `blocks`
+    // and `tocHeadings` were computed properties that re-split the
+    // entire raw string on every access — and `.modifier(BlockTextSelection(
+    // isHeading: isHeadingBlock(idx)))` per row meant a scroll tick did
+    // O(N) full re-parses, pegging the main thread on
+    // GraphHost.flushTransactions.
     @State private var document: ParsedDocument = .empty
     private var rawMarkdown: String {
         get { document.raw }
@@ -125,6 +133,19 @@ struct ContentView: View {
     /// visible block, which is what we anchor a new bookmark to.
     @State private var visibleBlocks: Set<Int> = []
 
+    // Heading-click copy. Clicking a heading copies that heading's full
+    // section (heading + content down to the next same-or-higher-level
+    // heading) as raw markdown source. `flashingBlocks` paints a brief
+    // accent fill on each block in the just-copied section as visual
+    // confirmation, then auto-clears. Normal click-drag still selects
+    // text via `.textSelection(.enabled)` — block-level selection is
+    // intentionally gone (annoying in practice when you actually wanted
+    // to grab a phrase).
+    @State private var flashingBlocks: Set<Int> = []
+    /// Workitem for the flash-clear timer, kept around so re-clicks can
+    /// cancel and restart cleanly (otherwise rapid clicks would race the
+    /// clear of an earlier flash).
+    @State private var flashClearWork: DispatchWorkItem? = nil
     /// Block the mouse is currently hovering. Drives the bookmark-anchor
     /// indicator (subtle accent stripe + tint) so the user can see what
     /// ⌘D will bookmark — there's no caret in a viewer.
@@ -442,8 +463,23 @@ struct ContentView: View {
         }
         .onChange(of: rawMarkdown) { _ in
             if isSearching { recomputeMatches() }
-            // The native text view reports the new visible character range after layout.
-            visibleBlocks = []
+            // Drop any in-progress copy flash on doc swap — block indices
+            // no longer refer to the same content.
+            flashClearWork?.cancel()
+            flashingBlocks = []
+            // Visible-block tracking carries indices from the leaving doc.
+            // We can't just `removeAll()`: SwiftUI's `ForEach(id: \.offset)`
+            // keeps blocks with the same offset mounted across a doc swap,
+            // so their `.onAppear` does NOT refire on the new doc — wiping
+            // the set leaves it permanently empty for indices that share
+            // identity with the old doc, and `topVisibleBlock` collapses
+            // to 0 even when the user is reading mid-document. Instead,
+            // drop only the indices that don't exist in the new doc; the
+            // surviving entries correctly reflect blocks still on screen
+            // (because their views were never unmounted), and SwiftUI's
+            // `.onAppear` / `.onDisappear` will manage the rest as the
+            // user scrolls.
+            visibleBlocks = visibleBlocks.filter { $0 < blocks.count }
             // Anchor precedence on a new document load:
             //   1. bookmark / placeholder jump (pendingPostLoadAnchor)
             //   2. fragment link click (pendingFragment)
@@ -1278,28 +1314,110 @@ struct ContentView: View {
             if rawMarkdown.isEmpty {
                 emptyState
             } else {
-                SelectableDocumentView(
-                    blocks: blocks,
-                    smartTypography: smartTypographyEnabled,
-                    identity: selectedEntry?.path ?? "",
-                    theme: themes.current,
-                    scale: themes.fontScale,
-                    baseURL: currentDocumentDirectory,
-                    loadRemoteImages: loadRemoteImages,
-                    query: isSearching ? query : "",
-                    isSearching: isSearching,
-                    matchBlock: isSearching && matches.indices.contains(currentMatchIndex)
-                        ? matches[currentMatchIndex].blockIndex : nil,
-                    matchOccurrence: matches.indices.contains(currentMatchIndex)
-                        ? matches.prefix(currentMatchIndex).filter { $0.blockIndex == matches[currentMatchIndex].blockIndex }.count : 0,
-                    scrollTarget: Binding(
-                        get: { pendingAnchorBlock ?? tocScrollTrigger },
-                        set: { value in pendingAnchorBlock = value; tocScrollTrigger = value }
-                    ),
-                    visibleBlocks: $visibleBlocks,
-                    hoveredBlock: $hoveredBlock,
-                    openLink: OpenURLAction { url in handleLinkClick(url) }
-                )
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(Array(blocks.enumerated()), id: \.offset) { (idx, block) in
+                                blockView(block: block, idx: idx)
+                                    .modifier(BlockTextSelection(isHeading: isHeadingBlock(idx)))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(blockBackground(forBlock: idx))
+                                            .animation(.easeOut(duration: 0.18), value: currentMatchIndex)
+                                            .animation(.easeOut(duration: 0.18), value: matches)
+                                            .animation(.easeOut(duration: 0.18), value: isSearching)
+                                            .animation(.easeOut(duration: 0.12), value: hoveredBlock)
+                                    )
+                                    .background(
+                                        // Brief flash after a heading-click copy: the
+                                        // copied section's blocks paint with the accent
+                                        // tint for ~0.6s, then clear. Gives the user
+                                        // confirmation that the click did something
+                                        // without a popup or toast.
+                                        Group {
+                                            if flashingBlocks.contains(idx) {
+                                                RoundedRectangle(cornerRadius: 4)
+                                                    .fill(themes.current.accent.opacity(0.18))
+                                            }
+                                        }
+                                        .animation(.easeOut(duration: 0.18), value: flashingBlocks)
+                                    )
+                                    .overlay(alignment: .leading) {
+                                        // Accent stripe along the left edge of the hovered block —
+                                        // this is the "you will bookmark here" affordance, since a
+                                        // read-only viewer has no insertion caret.
+                                        if hoveredBlock == idx && highlightColor(forBlock: idx) == .clear && !flashingBlocks.contains(idx) {
+                                            Rectangle()
+                                                .fill(themes.current.accent)
+                                                .frame(width: 2)
+                                                .padding(.vertical, 1)
+                                                .transition(.opacity)
+                                        }
+                                    }
+                                    .contentShape(Rectangle())
+                                    .id("block-\(idx)")
+                                    .onAppear { visibleBlocks.insert(idx) }
+                                    .onDisappear {
+                                        visibleBlocks.remove(idx)
+                                        if hoveredBlock == idx { hoveredBlock = nil }
+                                    }
+                                    .onHover { inside in
+                                        if inside {
+                                            hoveredBlock = idx
+                                            if isHeadingBlock(idx) {
+                                                NSCursor.pointingHand.push()
+                                            }
+                                        } else {
+                                            if hoveredBlock == idx { hoveredBlock = nil }
+                                            if isHeadingBlock(idx) {
+                                                NSCursor.pop()
+                                            }
+                                        }
+                                    }
+                                    .onTapGesture {
+                                        // Heading single-click → copy the whole section
+                                        // as markdown to the pasteboard. Non-heading
+                                        // blocks: ignore — `.textSelection(.enabled)`
+                                        // owns drag-to-select for prose.
+                                        if isHeadingBlock(idx) {
+                                            copySection(headingAt: idx)
+                                        }
+                                    }
+                            }
+                        }
+                        .padding(.horizontal, themes.current.articleHorizontalPadding)
+                        .padding(.vertical, 28)
+                        .frame(maxWidth: themes.current.articleMaxWidth ?? .infinity, alignment: .leading)
+                        .frame(maxWidth: .infinity,
+                               alignment: themes.current.articleMaxWidth == nil ? .leading : .center)
+                        .background(DocumentScrollKeys())
+                    }
+                    .onChange(of: currentMatchIndex) { _ in
+                        scrollToCurrentMatch(proxy: proxy)
+                    }
+                    .onChange(of: tocScrollTrigger) { newValue in
+                        guard let target = newValue else { return }
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo("block-\(target)", anchor: .top)
+                        }
+                        DispatchQueue.main.async {
+                            tocScrollTrigger = nil
+                        }
+                    }
+                    .onChange(of: pendingAnchorBlock) { newValue in
+                        guard let target = newValue else { return }
+                        // The blocks may not all be laid out yet on first paint —
+                        // give SwiftUI a tick before scrolling.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                proxy.scrollTo("block-\(target)", anchor: .top)
+                            }
+                            pendingAnchorBlock = nil
+                        }
+                    }
+                }
             }
         }
         .background(themes.current.background)
@@ -1380,6 +1498,53 @@ struct ContentView: View {
     }
 
     private var blocks: [String] { document.blocks }
+
+    // MARK: - Section copy
+
+    /// True if the block at `idx` is an ATX heading (`#`, `##`, `###`).
+    private func isHeadingBlock(_ idx: Int) -> Bool {
+        tocHeadings.contains(where: { $0.blockIndex == idx })
+    }
+
+    /// Range of blocks that make up the section starting at the heading
+    /// in `idx` — heading included, ending at the next heading of the
+    /// *same or higher* level (or end of document). Mirrors how readers
+    /// think about "this section": H2 ends at the next H2 or H1, not at
+    /// the next H3.
+    private func sectionRange(forHeadingAt idx: Int) -> Range<Int> {
+        guard let h = tocHeadings.first(where: { $0.blockIndex == idx }) else {
+            return idx..<idx + 1
+        }
+        let endIdx = tocHeadings.first(where: {
+            $0.blockIndex > idx && $0.level <= h.level
+        })?.blockIndex ?? blocks.count
+        return idx..<endIdx
+    }
+
+    /// One-shot: copy the section starting at `idx` to the pasteboard
+    /// (joined by `\n\n` so it round-trips back into another markdown
+    /// doc), then briefly paint the section's blocks with the accent tint
+    /// as visual confirmation. The flash auto-clears after 0.6s; a
+    /// re-click cancels and restarts the clear so rapid copies don't
+    /// race each other.
+    private func copySection(headingAt idx: Int) {
+        let span = sectionRange(forHeadingAt: idx)
+        let text = span.compactMap { i in
+            i < blocks.count ? blocks[i] : nil
+        }.joined(separator: "\n\n")
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+
+        // Visual confirmation flash.
+        flashClearWork?.cancel()
+        flashingBlocks = Set(span)
+        let work = DispatchWorkItem {
+            flashingBlocks = []
+        }
+        flashClearWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+    }
 
     // MARK: - Table of Contents
 
@@ -1955,6 +2120,34 @@ struct ContentView: View {
         }
     }
 
+    /// Renders one markdown block. If find is active and the block contains
+    /// a hit AND the block's structure is one we can losslessly re-render
+    /// inline (paragraph / heading / list / blockquote — i.e. not code or
+    /// table), swap MarkdownUI for an AttributedString-based Text so we
+    /// can paint a yellow highlight on the matched substrings themselves.
+    /// Other blocks keep MarkdownUI's full rendering and rely on the
+    /// block-level tint for find feedback.
+    @ViewBuilder
+    private func blockView(block: String, idx: Int) -> some View {
+        if shouldInlineHighlight(block: block, idx: idx) {
+            // Find-highlight path: render straight punctuation. Smartening
+            // here would shift character offsets and misalign the yellow
+            // highlight ranges (which were computed against rawMarkdown).
+            // The mismatch only surfaces while find is active in matched
+            // blocks; everything else still gets smart typography.
+            Text(highlightedAttributedString(for: block, idx: idx))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
+                .markdownTheme(themes.current.markdownTheme(scale: themes.fontScale))
+                .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
+                .markdownImageProvider(LocalImageProvider(
+                    baseURL: currentDocumentDirectory,
+                    loadRemoteImages: loadRemoteImages
+                ))
+        }
+    }
+
     /// Whether to apply SmartyPants-style typography on the next render.
     /// Honors both the user's preference and the active theme's opt-out
     /// (Phosphor and Standard Erin Light/Dark force this off).
@@ -2152,6 +2345,70 @@ struct ContentView: View {
         return out
     }
 
+    private func shouldInlineHighlight(block: String, idx: Int) -> Bool {
+        guard isSearching, !query.isEmpty else { return false }
+        guard matches.contains(where: { $0.blockIndex == idx }) else { return false }
+        let trimmed = block.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") { return false }
+        // Crude table detection: header row of pipes followed by an alignment row.
+        let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.count >= 2,
+           lines[0].contains("|"),
+           lines[1].allSatisfy({ "-:| ".contains($0) }) {
+            return false
+        }
+        // Inline-highlight strips block markers and renders via Text, which
+        // doesn't render embedded images. Defer to MarkdownUI for any block
+        // containing an image so the image survives — the user still gets
+        // the block-level yellow tint as a find affordance.
+        if trimmed.contains("![") { return false }
+        return true
+    }
+
+    private func highlightedAttributedString(for block: String, idx: Int) -> AttributedString {
+        let theme = themes.current
+        let isCurrentBlock = matches.indices.contains(currentMatchIndex)
+                          && matches[currentMatchIndex].blockIndex == idx
+
+        // Strip block-level markers per line so the inline render reads
+        // cleanly. Lists keep a literal bullet so the user sees the list
+        // shape; headings/blockquotes/numbered lists drop the marker.
+        let cleaned = block.components(separatedBy: "\n").map { line -> String in
+            var l = line
+            l = l.replacingOccurrences(of: #"^#{1,6}\s+"#, with: "", options: .regularExpression)
+            l = l.replacingOccurrences(of: #"^>\s?"#, with: "", options: .regularExpression)
+            l = l.replacingOccurrences(of: #"^[-*+]\s+"#, with: "• ", options: .regularExpression)
+            l = l.replacingOccurrences(of: #"^\d+\.\s+"#, with: "", options: .regularExpression)
+            return l
+        }.joined(separator: "\n")
+
+        var attr: AttributedString
+        do {
+            attr = try AttributedString(
+                markdown: cleaned,
+                options: AttributedString.MarkdownParsingOptions(
+                    allowsExtendedAttributes: true,
+                    interpretedSyntax: .inlineOnlyPreservingWhitespace
+                )
+            )
+        } catch {
+            attr = AttributedString(cleaned)
+        }
+        attr.foregroundColor = NSColor(theme.text)
+
+        // Highlight each occurrence of the query. Current-match block gets
+        // a stronger yellow so the navigation focus is obvious.
+        let alpha = isCurrentBlock ? 0.55 : 0.32
+        let highlight = NSColor.systemYellow.withAlphaComponent(alpha)
+        var cursor = attr.startIndex
+        while cursor < attr.endIndex,
+              let range = attr[cursor...].range(of: query, options: .caseInsensitive) {
+            attr[range].backgroundColor = highlight
+            cursor = range.upperBound
+        }
+        return attr
+    }
+
     private func recomputeMatches() {
         guard !query.isEmpty else {
             matches = []
@@ -2159,10 +2416,9 @@ struct ContentView: View {
             return
         }
         var found: [SearchMatch] = []
-        for (i, source) in blocks.enumerated() {
-            let block = MarkdownContent(smartTypographyEnabled ? smartenMarkdown(source) : source).renderPlainText()
+        for (i, block) in blocks.enumerated() {
             var searchRange = block.startIndex..<block.endIndex
-            while let r = block.range(of: query, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange) {
+            while let r = block.range(of: query, options: .caseInsensitive, range: searchRange) {
                 found.append(SearchMatch(blockIndex: i))
                 searchRange = r.upperBound..<block.endIndex
             }
@@ -2197,6 +2453,34 @@ struct ContentView: View {
     private func previousMatch() {
         guard !matches.isEmpty else { return }
         currentMatchIndex = (currentMatchIndex - 1 + matches.count) % matches.count
+    }
+
+    private func highlightColor(forBlock idx: Int) -> Color {
+        guard isSearching, !matches.isEmpty else { return .clear }
+        let isCurrent = matches.indices.contains(currentMatchIndex)
+            && matches[currentMatchIndex].blockIndex == idx
+        if isCurrent { return Color.yellow.opacity(0.35) }
+        if matches.contains(where: { $0.blockIndex == idx }) {
+            return Color.yellow.opacity(0.12)
+        }
+        return .clear
+    }
+
+    /// Background fill for a markdown block. Find highlights win over hover so
+    /// search-in-progress feedback isn't drowned out by mouse position.
+    private func blockBackground(forBlock idx: Int) -> Color {
+        let find = highlightColor(forBlock: idx)
+        if find != .clear { return find }
+        if hoveredBlock == idx { return themes.current.accent.opacity(0.07) }
+        return .clear
+    }
+
+    private func scrollToCurrentMatch(proxy: ScrollViewProxy) {
+        guard matches.indices.contains(currentMatchIndex) else { return }
+        let match = matches[currentMatchIndex]
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo("block-\(match.blockIndex)", anchor: .center)
+        }
     }
 
     private var emptyState: some View {
@@ -2721,6 +3005,24 @@ fileprivate func stripInlineMarkdown(_ s: String) -> String {
         options: .regularExpression
     )
     return out.trimmingCharacters(in: .whitespaces)
+}
+
+/// Per-block text-selection gating. Prose blocks have `.enabled` so the
+/// user can drag-copy phrases as normal. Heading blocks have `.disabled`
+/// so the parent `.textSelection(.enabled)` doesn't intercept clicks —
+/// otherwise the heading-single-click copy handler never fires. Lifted
+/// to a standalone modifier because inlining the conditional inside the
+/// `ForEach` blew the SwiftUI type-checker's expression-complexity
+/// budget for the surrounding view.
+private struct BlockTextSelection: ViewModifier {
+    let isHeading: Bool
+    func body(content: Content) -> some View {
+        if isHeading {
+            content.textSelection(.disabled)
+        } else {
+            content.textSelection(.enabled)
+        }
+    }
 }
 
 // MARK: - Find text field
