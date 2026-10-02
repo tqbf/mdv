@@ -37,12 +37,17 @@ Every program eventually evolves bookmarks. We did not fight it.
 
 ## Sidebars
 
-- **TOC** — h1/h2/h3 headings, click to jump. Toggle from the toolbar.
+- **TOC** — h1/h2/h3 headings, click to jump. Toggle from the toolbar; drag its left edge to resize (the width is remembered).
 - **History** — every file you have opened, ever, until you swipe one left and tap delete. Survives restart.
 
 ## Themes
 
 A frustrated, untalented graphic designer (the author) could not resist letting two LLMs argue with him about typography. The result is several themes. Pick one from the toolbar. Do not @ me about font choices.
+
+## Diagrams and math
+
+- ` ```mermaid ` fences render as diagrams. Hover for the toolbar: switch style, show the source, export a PNG.
+- `$…$` renders inline LaTeX math and `$$…$$` renders a display equation, typeset natively in Latin Modern Math. Right-click a display equation to copy its LaTeX. `\$` and dollars in code stay dollars; "$5 and $10" stays prose.
 
 ## Editor integration
 

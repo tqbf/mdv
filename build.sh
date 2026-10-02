@@ -30,6 +30,10 @@ cp mdv/AppIcon.icns             "$APP/Contents/Resources/AppIcon.icns"
 cp mdv/Fonts/*.otf              "$APP/Contents/Resources/"
 cp mdv/Grammars/*-highlights.scm "$APP/Contents/Resources/"
 
+# Math font for LaTeX rendering. SwiftMath (vendored) looks for this in the
+# app's Resources — see Vendor/SwiftMath/README.md.
+cp -R Vendor/SwiftMath/mathFonts.bundle "$APP/Contents/Resources/mathFonts.bundle"
+
 # Bundle the CLI helper so the app can install /usr/local/bin/mdv pointing
 # at this script — the in-app "Install Command Line Tool…" menu symlinks
 # to this path.

@@ -28,6 +28,10 @@ history sidebar with the rest.
 - [toc-stress.md](toc-stress.md) — many headings at every level so
   you can exercise the TOC pane, the spyglass-collapse search, and
   the "On this page" affordances.
+- [math.md](math.md) — `$…$` and `$$…$$` LaTeX: inline, display,
+  environments (cases/matrices/aligned), math inside lists, quotes,
+  tables and headings, plus the dollar signs that must stay literal
+  (prices, `\$`, code). Verifies `MathMarkdown` + SwiftMath.
 - [thematic-break.md](thematic-break.md) — every CommonMark
   thematic-break variant (`---`, `----`, `* * *`, `_ _ _`, `- - -`,
   setext H2) plus inline dash sequences that must *not* become rules.

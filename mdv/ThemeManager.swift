@@ -77,6 +77,13 @@ struct MDVTheme: Identifiable, Hashable {
     var h1SizeEm: CGFloat = 1.75
     var h2SizeEm: CGFloat = 1.4
     var h3SizeEm: CGFloat = 1.15
+    /// h4–h6 are fixed across themes.
+    var h4SizeEm: CGFloat { 1.0 }
+    var h5SizeEm: CGFloat { 0.875 }
+    var h6SizeEm: CGFloat { 0.85 }
+    /// Heading font size relative to body, indexed by level − 1. Used by
+    /// `markdownTheme` and by math spans inside headings (MathMarkdown).
+    var headingSizeEms: [CGFloat] { [h1SizeEm, h2SizeEm, h3SizeEm, h4SizeEm, h5SizeEm, h6SizeEm] }
 
     /// Weight applied to h1–h6. Default `.semibold` matches MarkdownUI's
     /// gitHub theme. Themes that bundle a heavy face whose Regular is
@@ -433,6 +440,8 @@ extension MDVTheme {
         let h1 = self.h1SizeEm
         let h2 = self.h2SizeEm
         let h3 = self.h3SizeEm
+        let h5 = self.h5SizeEm
+        let h6 = self.h6SizeEm
         let h1Rule = self.showH1Rule
         let h2Rule = self.showH2Rule
         let pBottom = self.paragraphBottomSpacing
@@ -517,7 +526,7 @@ extension MDVTheme {
                     .markdownMargin(top: 24, bottom: 16)
                     .markdownTextStyle {
                         FontWeight(headWeight)
-                        FontSize(.em(0.875))
+                        FontSize(.em(h5))
                         ForegroundColor(head)
                     }
             }
@@ -527,7 +536,7 @@ extension MDVTheme {
                     .markdownMargin(top: 24, bottom: 16)
                     .markdownTextStyle {
                         FontWeight(headWeight)
-                        FontSize(.em(0.85))
+                        FontSize(.em(h6))
                         ForegroundColor(ttxt)
                     }
             }

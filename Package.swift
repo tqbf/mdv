@@ -18,6 +18,7 @@ let package = Package(
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
                 .product(name: "SwiftTreeSitter", package: "SwiftTreeSitter"),
                 .product(name: "BeautifulMermaid", package: "beautiful-mermaid-swift"),
+                "SwiftMath",
             ],
             path: "mdv",
             exclude: [
@@ -30,6 +31,13 @@ let package = Package(
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
             ]
+        ),
+        // Vendored copy of mgriebling/SwiftMath (LaTeX math typesetting).
+        // See Vendor/SwiftMath/README.md for why it is not a package
+        // dependency. Its font bundle is copied into the app by build.sh.
+        .target(
+            name: "SwiftMath",
+            path: "Vendor/SwiftMath/Sources/SwiftMath"
         ),
         .target(
             name: "CGrammars",

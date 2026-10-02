@@ -16,6 +16,8 @@ of an evening while yelling at people about zoning reform.
 
 * It supports TEXT SEARCH TECHNOLOGY. This is a feature that other Markdown viewers on the App Store don't support. I may patent it.
 
+* It renders Mermaid diagrams (` ```mermaid ` fences) and LaTeX math (`$…$`, `$$…$$`), both natively — no WebView.
+
 * It renders a TOC navigator as a sidebar.
 
 * It has color/display themes because I am a frustrated and untalented graphic designer and couldn't resist spending 30 minutes having Claude and GPT 5.5 argue back and forth with me about typography.

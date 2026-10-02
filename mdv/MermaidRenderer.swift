@@ -1,5 +1,6 @@
 @preconcurrency import AppKit
 import BeautifulMermaid
+import SwiftMath
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -265,8 +266,10 @@ struct MDVMermaidDiagramView: View {
     let theme: MDVTheme
     let style: MermaidRenderStyle
 
+    @State private var prepared: MDVMermaidPrepared?
     @State private var image: NSImage?
     @State private var failed = false
+    @State private var availableWidth: CGFloat = 0
     @State private var zoom: CGFloat = 1
     @State private var committedZoom: CGFloat = 1
 
@@ -274,12 +277,26 @@ struct MDVMermaidDiagramView: View {
         MDVMermaidRenderKey(source: source, theme: theme, style: style)
     }
 
+    /// Width the diagram is drawn at: its natural width, or the column if
+    /// that's narrower. Never upscaled — a bitmap stretched past 1:1 is
+    /// what "washed out" looks like. Whole points so the raster lands on
+    /// the pixel grid.
+    private var displayWidth: CGFloat {
+        guard let prepared, availableWidth > 0 else { return 0 }
+        return floor(min(prepared.size.width, max(availableWidth - 36, 1)))
+    }
+
+    private var displayHeight: CGFloat {
+        guard let prepared, displayWidth > 0 else { return 0 }
+        return MDVMermaidPipeline.displaySize(for: prepared, width: displayWidth).height
+    }
+
     var body: some View {
         Group {
-            if let image {
-                diagramBody(for: image)
-            } else if failed {
+            if failed {
                 MermaidFallbackView(source: source, theme: theme)
+            } else if let image, prepared != nil {
+                diagramBody(for: image)
             } else {
                 ProgressView()
                     .controlSize(.small)
@@ -288,46 +305,67 @@ struct MDVMermaidDiagramView: View {
                     .padding(.vertical, 16)
             }
         }
+        .frame(maxWidth: .infinity)
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { availableWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { availableWidth = $0 }
+            }
+        )
         .task(id: renderKey) {
             failed = false
+            prepared = nil
             image = nil
             zoom = 1
             committedZoom = 1
-            if let rendered = await MDVMermaidImageCache.shared.image(source: source, theme: theme, style: style, key: renderKey) {
-                if !Task.isCancelled { image = rendered }
+            if let result = await MDVMermaidImageCache.shared.prepared(source: source, theme: theme, style: style, key: renderKey) {
+                if !Task.isCancelled { prepared = result }
             } else if !Task.isCancelled {
                 failed = true
             }
         }
+        // Re-rasterize when the column width or the committed zoom changes.
+        // Layout is cached; this is just CoreText drawing at the new size.
+        .task(id: RasterRequest(key: renderKey, width: displayWidth * committedZoom, ready: prepared != nil)) {
+            guard let prepared, displayWidth > 0 else { return }
+            let width = floor(displayWidth * committedZoom)
+            let raster = await MDVMermaidImageCache.shared.raster(prepared, key: renderKey, width: width)
+            if !Task.isCancelled { image = raster }
+        }
+    }
+
+    private struct RasterRequest: Hashable {
+        let key: MDVMermaidRenderKey
+        let width: CGFloat
+        let ready: Bool
     }
 
     @ViewBuilder
     private func diagramBody(for image: NSImage) -> some View {
-        let aspect = image.size.width > 0 ? image.size.width / image.size.height : 1
+        // Not `.resizable()`: the raster already is the display size, and a
+        // resizable Image goes through a resampling draw even at 1:1. While
+        // a pinch is in flight the bitmap is scaled visually; on release
+        // it's re-rasterised at the committed zoom.
+        let inFlight = committedZoom > 0 ? zoom / committedZoom : 1
         let baseImage = Image(nsImage: image)
-            .resizable()
-            .interpolation(.high)
-            .aspectRatio(aspect, contentMode: .fit)
+            .scaleEffect(inFlight)
+            .frame(width: image.size.width * inFlight, height: image.size.height * inFlight)
 
         if zoom > 1.01 {
             // Zoomed: inner ScrollView for panning. Pin the container height
-            // to the unzoomed fit height so the document doesn't reflow during pinch.
-            GeometryReader { proxy in
-                let fitWidth = max(proxy.size.width - 36, 1)
-                let fitHeight = fitWidth / aspect
-                ScrollView([.horizontal, .vertical], showsIndicators: true) {
-                    baseImage
-                        .frame(width: fitWidth * zoom, height: fitHeight * zoom)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 12)
-                }
+            // to the unzoomed fit height so the document doesn't reflow.
+            ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                baseImage
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
             }
-            .frame(height: 540)
+            .frame(height: min(displayHeight + 24, 540))
             .gesture(mermaidZoomGesture)
             .accessibilityLabel("Mermaid diagram")
         } else {
-            // Unzoomed: render inline at the container width × intrinsic aspect.
-            // No inner ScrollView, so wheel events bubble up to the document scroll.
+            // Unzoomed: drawn 1:1 at displayWidth, centred in the column. No
+            // inner ScrollView, so wheel events bubble up to the document scroll.
             baseImage
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 18)
@@ -373,42 +411,666 @@ struct MDVMermaidRenderKey: Hashable {
     }
 }
 
+/// Layout output, kept so the diagram can be re-drawn at any width without
+/// running ELK again. `math` holds typeset `$$` node labels (block-based
+/// NSImages, so they re-rasterize crisply at whatever scale they're drawn).
+final class MDVMermaidPrepared: @unchecked Sendable {
+    let positioned: PositionedGraph
+    let theme: DiagramTheme
+    let math: [String: NSImage]
+    /// Sequence-diagram message labels that contained `<br>`, by message
+    /// index, drawn by `rasterize` since the library draws one line only.
+    let messageLines: [Int: [String]]
+    /// `autonumber` was set: draw a numbered badge at each message's tail.
+    let autonumber: Bool
+    /// Natural size in points.
+    let size: CGSize
+
+    init(positioned: PositionedGraph, theme: DiagramTheme, math: [String: NSImage], messageLines: [Int: [String]] = [:], autonumber: Bool = false) {
+        self.positioned = positioned
+        self.theme = theme
+        self.math = math
+        self.messageLines = messageLines
+        self.autonumber = autonumber
+        self.size = CGSize(width: max(1, positioned.width), height: max(1, positioned.height))
+    }
+}
+
 final class MDVMermaidImageCache {
     static let shared = MDVMermaidImageCache()
 
-    private let entries: NSCache<NSString, MDVMermaidImageCacheEntry> = {
-        let cache = NSCache<NSString, MDVMermaidImageCacheEntry>()
+    private let layouts: NSCache<NSString, MDVMermaidPrepared> = {
+        let cache = NSCache<NSString, MDVMermaidPrepared>()
         cache.countLimit = 96
-        cache.totalCostLimit = 128 * 1024 * 1024
         return cache
     }()
 
-    func image(source: String, theme: MDVTheme, style: MermaidRenderStyle, key: MDVMermaidRenderKey) async -> NSImage? {
-        if let cached = entries.object(forKey: key.cacheID) { return cached.image }
-        let rendered = await renderImage(source: source, theme: theme, style: style, scale: key.scale)
-        let entry = MDVMermaidImageCacheEntry(image: rendered)
-        entries.setObject(entry, forKey: key.cacheID, cost: max(rendered?.bitmapCost ?? 1, 1))
-        return rendered
+    private let rasters: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 192
+        cache.totalCostLimit = 192 * 1024 * 1024
+        return cache
+    }()
+
+    func prepared(source: String, theme: MDVTheme, style: MermaidRenderStyle, key: MDVMermaidRenderKey) async -> MDVMermaidPrepared? {
+        if let cached = layouts.object(forKey: key.cacheID) { return cached }
+        let diagramTheme = style.diagramTheme(for: theme)
+        let result = await Task.detached(priority: .userInitiated) {
+            try? MDVMermaidPipeline.prepare(source: source, theme: diagramTheme)
+        }.value
+        if let result { layouts.setObject(result, forKey: key.cacheID) }
+        return result
     }
 
-    private func renderImage(source: String, theme: MDVTheme, style: MermaidRenderStyle, scale: CGFloat) async -> NSImage? {
-        let diagramTheme = style.diagramTheme(for: theme)
+    /// The diagram drawn `width` points wide at the key's backing scale.
+    func raster(_ prepared: MDVMermaidPrepared, key: MDVMermaidRenderKey, width: CGFloat) async -> NSImage? {
+        let id = "\(key.cacheID)|w=\(width)" as NSString
+        if let cached = rasters.object(forKey: id) { return cached }
+        let scale = key.scale
+        let image = await Task.detached(priority: .userInitiated) {
+            SendableMermaidImage(image: MDVMermaidPipeline.rasterize(prepared, width: width, scale: scale))
+        }.value.image
+        if let image { rasters.setObject(image, forKey: id, cost: max(image.bitmapCost, 1)) }
+        return image
+    }
+
+    /// Natural-size image at 2× — for PNG export.
+    func image(source: String, theme: MDVTheme, style: MermaidRenderStyle, key: MDVMermaidRenderKey) async -> NSImage? {
+        guard let prepared = await prepared(source: source, theme: theme, style: style, key: key) else { return nil }
         return await Task.detached(priority: .userInitiated) {
-            guard let image = try? MermaidRenderer.renderImage(
-                source: source,
-                theme: diagramTheme,
-                scale: scale
-            ) else { return SendableMermaidImage(image: nil) }
-            return SendableMermaidImage(image: image.flippedVertically())
+            SendableMermaidImage(image: MDVMermaidPipeline.rasterize(prepared, width: ceil(prepared.size.width), scale: 2))
         }.value.image
     }
 }
 
-final class MDVMermaidImageCacheEntry {
-    let image: NSImage?
+// Parse → normalize → layout → render, instead of the library's one-shot
+// `MermaidRenderer.renderImage`, so we can repair the parsed model before it
+// reaches the ELK layout engine. ELK enforces its invariants with `assert`,
+// which is uncatchable and takes the whole app down.
+enum MDVMermaidPipeline {
+    /// Parse, repair, typeset math labels, and run ELK. The expensive half;
+    /// `rasterize` does the rest and can be repeated at any width.
+    static func prepare(source: String, theme: DiagramTheme) throws -> MDVMermaidPrepared {
+        var graph = try MermaidParser.parse(sanitize(source))
+        var mathNodes: [String: NSImage] = [:]
+        var messageLines: [Int: [String]] = [:]
+        switch graph.typedPayload {
+        case .flowchart(var model), .stateDiagram(var model):
+            normalizeSubgraphOwnership(model)
+            if graph.type == .stateDiagram { applyStateStyles(in: &model, source: sanitize(source)) }
+            mathNodes = substituteMath(in: &model, theme: theme)
+            graph.payload = model
+        case .sequenceDiagram(var seq):
+            messageLines = resolveLineBreaks(in: &seq)
+            graph.payload = seq
+        default:
+            break
+        }
+        var positioned = try GraphLayout().layout(graph)
+        var autonumber = false
+        if graph.type == .sequenceDiagram {
+            widenActorGaps(&positioned, messageLines: messageLines)
+            expandRows(&positioned, for: messageLines)
+            fitBlocksAroundNotes(&positioned)
+            autonumber = source.range(of: #"(?m)^\s*autonumber\b"#, options: .regularExpression) != nil
+        }
+        return MDVMermaidPrepared(positioned: positioned, theme: theme, math: mathNodes, messageLines: messageLines, autonumber: autonumber)
+    }
 
-    init(image: NSImage?) {
-        self.image = image
+    /// The layout spaces actors by their box widths only, so a long message
+    /// label runs straight through the neighbouring lifelines (Mermaid.js
+    /// widens the gap to fit). Grow each gap until every message's label
+    /// fits between its endpoints, then remap every x in the diagram through
+    /// the old→new actor centres (piecewise linear, so block edges and note
+    /// boxes anchored between actors move with them).
+    private static func widenActorGaps(_ positioned: inout PositionedGraph, messageLines: [Int: [String]]) {
+        guard case .sequenceDiagram(var actors, var messages, var blocks, var lifelines, var activations, var notes) = positioned.content,
+              actors.count > 1 else { return }
+        let font = NSFont.systemFont(ofSize: 11)
+        func width(_ text: String) -> Double { (text as NSString).size(withAttributes: [.font: font]).width }
+        let index = Dictionary(actors.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let oldX = actors.map(\.x)
+        var gaps = (1..<actors.count).map { oldX[$0] - oldX[$0 - 1] }
+
+        for (i, msg) in messages.enumerated() {
+            guard let a = index[msg.from], let b = index[msg.to] else { continue }
+            let lines = messageLines[i] ?? [msg.label]
+            let needed = (lines.map(width).max() ?? 0) + 24
+            if a == b {
+                // Self message: label sits to the right of the loop, before the next lifeline.
+                guard a + 1 < actors.count else { continue }
+                let have = gaps[a] - actors[a + 1].width / 2
+                if have < needed + 36 { gaps[a] += needed + 36 - have }
+            } else {
+                let lo = min(a, b), hi = max(a, b)
+                let span = (lo..<hi).reduce(0.0) { $0 + gaps[$1] }
+                if span < needed { gaps[hi - 1] += needed - span }
+            }
+        }
+
+        var newX = [oldX[0]]
+        for g in gaps { newX.append(newX[newX.count - 1] + g) }
+        guard newX != oldX else { return }
+
+        func remap(_ x: Double) -> Double {
+            if x <= oldX[0] { return x + (newX[0] - oldX[0]) }
+            for k in 1..<oldX.count where x <= oldX[k] {
+                let t = (x - oldX[k - 1]) / max(oldX[k] - oldX[k - 1], 0.001)
+                return newX[k - 1] + t * (newX[k] - newX[k - 1])
+            }
+            return x + (newX[newX.count - 1] - oldX[oldX.count - 1])
+        }
+
+        for i in actors.indices { actors[i].x = newX[i] }
+        for i in lifelines.indices { lifelines[i].x = remap(lifelines[i].x) }
+        for i in activations.indices { activations[i].x = remap(activations[i].x + activations[i].width / 2) - activations[i].width / 2 }
+        for i in messages.indices {
+            messages[i].x1 = remap(messages[i].x1)
+            messages[i].x2 = remap(messages[i].x2)
+        }
+        for i in notes.indices {
+            // Keep the box size; move its anchor (centre for "over", the near edge otherwise).
+            switch notes[i].position {
+            case "left":  notes[i].x = remap(notes[i].x + notes[i].width) - notes[i].width
+            case "right": notes[i].x = remap(notes[i].x)
+            default:      notes[i].x = remap(notes[i].x + notes[i].width / 2) - notes[i].width / 2
+            }
+        }
+        for i in blocks.indices {
+            let left = remap(blocks[i].x), right = remap(blocks[i].x + blocks[i].width)
+            blocks[i].x = left
+            blocks[i].width = right - left
+        }
+        positioned.width += newX[newX.count - 1] - oldX[oldX.count - 1]
+        positioned.content = .sequenceDiagram(
+            actors: actors, messages: messages, blocks: blocks,
+            lifelines: lifelines, activations: activations, notes: notes
+        )
+    }
+
+    /// A note placed after the last message of a block is laid out below
+    /// the block's bottom edge (the layout ends blocks at the last message).
+    /// Extend such blocks to enclose the note.
+    private static func fitBlocksAroundNotes(_ positioned: inout PositionedGraph) {
+        guard case .sequenceDiagram(let actors, let messages, var blocks, let lifelines, let activations, let notes) = positioned.content,
+              !notes.isEmpty else { return }
+        for i in blocks.indices {
+            let bottom = blocks[i].y + blocks[i].height
+            for note in notes {
+                let noteBottom = note.y + note.height
+                let overlapsX = note.x < blocks[i].x + blocks[i].width && note.x + note.width > blocks[i].x
+                if overlapsX, note.y > blocks[i].y, note.y < bottom, noteBottom + 8 > bottom {
+                    blocks[i].height = noteBottom + 8 - blocks[i].y
+                }
+            }
+        }
+        positioned.content = .sequenceDiagram(
+            actors: actors, messages: messages, blocks: blocks,
+            lifelines: lifelines, activations: activations, notes: notes
+        )
+    }
+
+    /// Line pitch of message labels drawn by `drawMessageLines`.
+    private static let messageLineHeight: Double = 13
+
+    /// The layout gives every message a fixed 40pt row. Open up the rows of
+    /// multi-line messages by pushing the message and everything below it
+    /// down `(lines − 1) × lineHeight`, and growing the blocks, lifelines
+    /// and diagram height that span it. Items above (previous arrow, block
+    /// header, divider) stay put, so the gap grows.
+    private static func expandRows(_ positioned: inout PositionedGraph, for messageLines: [Int: [String]]) {
+        guard case .sequenceDiagram(let actors, var messages, var blocks, var lifelines, var activations, var notes) = positioned.content else { return }
+        var total = 0.0
+        for index in messageLines.keys.sorted() {
+            guard messages.indices.contains(index), let lines = messageLines[index], lines.count > 1 else { continue }
+            let extra = Double(lines.count - 1) * messageLineHeight + 4
+            let threshold = messages[index].y - 0.5
+            for i in messages.indices where messages[i].y >= threshold { messages[i].y += extra }
+            for i in notes.indices where notes[i].y >= threshold { notes[i].y += extra }
+            for i in activations.indices {
+                if activations[i].topY >= threshold { activations[i].topY += extra }
+                if activations[i].bottomY >= threshold { activations[i].bottomY += extra }
+            }
+            for i in lifelines.indices where lifelines[i].bottomY >= threshold { lifelines[i].bottomY += extra }
+            for i in blocks.indices {
+                if blocks[i].y >= threshold {
+                    blocks[i].y += extra
+                } else if blocks[i].y + blocks[i].height >= threshold {
+                    blocks[i].height += extra
+                }
+                for d in blocks[i].dividers.indices where blocks[i].dividers[d].y >= threshold {
+                    blocks[i].dividers[d].y += extra
+                }
+            }
+            total += extra
+        }
+        positioned.height += total
+        positioned.content = .sequenceDiagram(
+            actors: actors, messages: messages, blocks: blocks,
+            lifelines: lifelines, activations: activations, notes: notes
+        )
+    }
+
+    // MARK: Sequence diagrams: <br> in labels
+
+    /// The sequence parser normalises `<br/>` to `<br>` and leaves it in the
+    /// label; only notes get real line breaks from the renderer. Notes: make
+    /// them newlines. Actors: the box is a fixed 40pt, so join with a space
+    /// (its width follows the label). Messages: the library draws one line
+    /// centred on the arrow, so blank the label and keep the lines for
+    /// `rasterize` to stack above the arrow.
+    private static func resolveLineBreaks(in seq: inout SequenceDiagram) -> [Int: [String]] {
+        let br = #"<br\s*/?>"#
+        for i in seq.notes.indices {
+            seq.notes[i].text = seq.notes[i].text.replacingOccurrences(of: br, with: "\n", options: [.regularExpression, .caseInsensitive])
+        }
+        for i in seq.actors.indices {
+            seq.actors[i].label = seq.actors[i].label.replacingOccurrences(of: br, with: " ", options: [.regularExpression, .caseInsensitive])
+        }
+        var lines: [Int: [String]] = [:]
+        for i in seq.messages.indices {
+            let label = seq.messages[i].label
+            guard label.range(of: br, options: [.regularExpression, .caseInsensitive]) != nil else { continue }
+            lines[i] = label
+                .replacingOccurrences(of: br, with: "\n", options: [.regularExpression, .caseInsensitive])
+                .components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            seq.messages[i].label = ""
+        }
+        return lines
+    }
+
+    /// Mermaid's `autonumber`: a filled disc with the 1-based message
+    /// number on the tail of each arrow. The library ignores the keyword.
+    private static func drawAutonumbers(_ prepared: MDVMermaidPrepared, size: CGSize, fitX: CGFloat, fitY: CGFloat, in ctx: CGContext) {
+        guard case .sequenceDiagram(_, let messages, _, _, _, _) = prepared.positioned.content else { return }
+        let radius = 8 * fitX
+        let font = NSFont.systemFont(ofSize: 9 * fitX, weight: .semibold)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: prepared.theme.background]
+        for (i, msg) in messages.enumerated() {
+            let cx = msg.x1 * fitX
+            let cy = size.height - msg.y * fitY
+            ctx.setFillColor(prepared.theme.foreground.cgColor)
+            ctx.fillEllipse(in: CGRect(x: cx - radius, y: cy - radius, width: 2 * radius, height: 2 * radius))
+            let text = NSAttributedString(string: "\(i + 1)", attributes: attributes)
+            let w = text.size().width, h = text.size().height
+            text.draw(in: CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h))
+        }
+    }
+
+    /// Mirrors the library's message-label placement (11pt edge-label font in
+    /// the muted colour; centred 8pt above a normal arrow, left of a self
+    /// loop) but stacks lines upward so none crosses the arrow.
+    private static func drawMessageLines(_ prepared: MDVMermaidPrepared, size: CGSize, fitX: CGFloat, fitY: CGFloat) {
+        guard case .sequenceDiagram(_, let messages, _, _, _, _) = prepared.positioned.content else { return }
+        let font = NSFont.systemFont(ofSize: 11 * fitX)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: prepared.theme.effectiveMuted()]
+        let lineHeight = messageLineHeight * fitY
+        for (index, lines) in prepared.messageLines {
+            guard messages.indices.contains(index) else { continue }
+            let msg = messages[index]
+            let sized = lines.map { NSAttributedString(string: $0, attributes: attributes) }
+            if msg.isSelf {
+                // Self loop: 28×20, label to its right, block centred on the loop.
+                let x = (msg.x1 + 28 + 4) * fitX
+                let centerY = size.height - (msg.y + 10) * fitY
+                var top = centerY + CGFloat(sized.count) * lineHeight / 2
+                for line in sized {
+                    line.draw(in: CGRect(x: x, y: top - lineHeight, width: line.size().width + 2, height: lineHeight))
+                    top -= lineHeight
+                }
+            } else {
+                let centerX = (msg.x1 + msg.x2) / 2 * fitX
+                var bottom = size.height - (msg.y - 2) * fitY   // lowest line sits just above the arrow
+                for line in sized.reversed() {
+                    let w = line.size().width + 2
+                    line.draw(in: CGRect(x: centerX - w / 2, y: bottom, width: w, height: lineHeight))
+                    bottom += lineHeight
+                }
+            }
+        }
+    }
+
+    /// Whole-point size a diagram is shown at when drawn `width` points
+    /// wide. Shared by the view (frame) and `rasterize` (bitmap) so the two
+    /// can never disagree.
+    static func displaySize(for prepared: MDVMermaidPrepared, width: CGFloat) -> CGSize {
+        let w = max(1, floor(width))
+        return CGSize(width: w, height: max(1, ceil(w * prepared.size.height / prepared.size.width)))
+    }
+
+    /// Draws the laid-out diagram `width` points wide (aspect preserved) into
+    /// a bitmap at `scale` px/pt, upright. Text is drawn by CoreText at the
+    /// final size instead of being drawn once and resampled, which is what
+    /// keeps labels as sharp as the document text around them.
+    static func rasterize(_ prepared: MDVMermaidPrepared, width: CGFloat, scale: CGFloat) -> NSImage? {
+        let natural = prepared.size
+        // The bitmap is exactly `displaySize(for:width:)` points — the same
+        // numbers the view uses for its frame — so it's shown 1:1. An
+        // off-by-one from floor(natural × fit) here was enough to make
+        // SwiftUI resample the whole diagram and soften every label.
+        let size = displaySize(for: prepared, width: width)
+        let fitX = size.width / natural.width
+        let fitY = size.height / natural.height
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width * scale), height: Int(size.height * scale),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.scaleBy(x: scale, y: scale)
+        ctx.setAllowsFontSmoothing(true)
+        ctx.setShouldSmoothFonts(true)
+
+        // The library draws y-down. Flip once here instead of flipping the
+        // finished bitmap.
+        ctx.saveGState()
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: fitX, y: -fitY)
+        DiagramRenderer(theme: prepared.theme).render(
+            prepared.positioned,
+            in: ctx,
+            bounds: CGRect(origin: .zero, size: natural)
+        )
+        ctx.restoreGState()
+
+        if !prepared.messageLines.isEmpty || prepared.autonumber {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+            drawMessageLines(prepared, size: size, fitX: fitX, fitY: fitY)
+            if prepared.autonumber { drawAutonumbers(prepared, size: size, fitX: fitX, fitY: fitY, in: ctx) }
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        // Typeset math over its nodes (y-up, in display points).
+        if !prepared.math.isEmpty, let nodes = prepared.positioned.flowchartNodes {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+            // Plain fill, same as document math. (A faux-bold fill+stroke was
+            // tried: it spreads ink into grey fringe and reads *lighter*.)
+            // Snap the destination to the pixel grid: NSImage rasterises a
+            // handler-backed image into a cache and then composites it, and
+            // a fractional origin means that composite is resampled — the
+            // glyphs come out visibly lighter and softer than the same
+            // formula drawn in the document.
+            func snap(_ v: CGFloat) -> CGFloat { (v * scale).rounded() / scale }
+            for node in nodes {
+                guard let image = prepared.math[node.id] else { continue }
+                let w = snap(image.size.width * fitX), h = snap(image.size.height * fitY)
+                let x = snap((node.x + (node.width - image.size.width) / 2) * fitX)
+                let yTop = snap((node.y + (node.height - image.size.height) / 2) * fitY)
+                image.draw(in: CGRect(x: x, y: size.height - yTop - h, width: w, height: h))
+            }
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        guard let cg = ctx.makeImage() else { return nil }
+        return NSImage(cgImage: cg, size: size)
+    }
+
+    // MARK: LaTeX in labels
+
+    /// Mermaid.js renders `$$…$$` inside node/edge labels with KaTeX;
+    /// BeautifulMermaid draws the dollars verbatim. A node whose label is
+    /// nothing but one math span gets typeset properly: the label is swapped
+    /// for a blank placeholder the layout measures to the same size, and the
+    /// math image is drawn over the node afterwards (`composite`). Math mixed
+    /// with text, and math in edge labels, falls back to the Unicode
+    /// approximation the TOC uses (`x²`, `≤`, `a/b`).
+    /// Body-text size rather than the 13pt node-label size: Latin Modern is
+    /// a light serif and at node-label size next to 500-weight system text it
+    /// reads as washed out. Same size as document display math.
+    private static let mathLabelFontSize: CGFloat = 16
+
+    private static func substituteMath(in model: inout ParsedGraphModel, theme: DiagramTheme) -> [String: NSImage] {
+        var images: [String: NSImage] = [:]
+        for idx in model.nodesInOrder.indices {
+            let label = model.nodesInOrder[idx].node.label
+            guard label.contains("$$") else { continue }
+            if let latex = wholeMathSpan(label), let image = typeset(latex, color: theme.foreground) {
+                images[model.nodesInOrder[idx].id] = image
+                model.nodesInOrder[idx].node.label = placeholder(for: image.size)
+            } else {
+                model.nodesInOrder[idx].node.label = MathMarkdown.plainText(label)
+            }
+        }
+        for idx in model.edges.indices {
+            if let label = model.edges[idx].label, label.contains("$$") {
+                model.edges[idx].label = MathMarkdown.plainText(label)
+            }
+        }
+        return images
+    }
+
+    /// The LaTeX if `label` is exactly one `$$…$$` span (whitespace and
+    /// line breaks around it allowed), else nil.
+    private static func wholeMathSpan(_ label: String) -> String? {
+        let t = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasPrefix("$$"), t.hasSuffix("$$"), t.count > 4 else { return nil }
+        let inner = t.dropFirst(2).dropLast(2)
+        guard !inner.contains("$$") else { return nil }
+        let latex = inner.trimmingCharacters(in: .whitespacesAndNewlines)
+        return latex.isEmpty ? nil : latex
+    }
+
+    private static func typeset(_ latex: String, color: NSColor) -> NSImage? {
+        MathSymbols.registerOnce()
+        var math = MathImage(
+            latex: MathSymbols.preprocess(latex),
+            fontSize: mathLabelFontSize,
+            textColor: color,
+            labelMode: .display,
+            textAlignment: .center
+        )
+        let (error, image, _) = math.asImage()
+        return error == nil ? image : nil
+    }
+
+    /// Blank text the library measures to at least `size`: spaces for width,
+    /// extra lines for height. Node padding is added by the layout as usual.
+    private static func placeholder(for size: CGSize) -> String {
+        let fontSize = original_src_styles.FONT_SIZES.nodeLabel
+        let weight = original_src_styles.FONT_WEIGHTS.nodeLabel
+        var line = " "
+        while original_src_text_metrics.measureMultilineText(line, fontSize: fontSize, fontWeight: weight).width < size.width,
+              line.count < 400 {
+            line.append(" ")
+        }
+        var text = line
+        while original_src_text_metrics.measureMultilineText(text, fontSize: fontSize, fontWeight: weight).height < size.height,
+              text.count < 4000 {
+            text += "\n" + line
+        }
+        return text
+    }
+
+    /// Two things Mermaid.js accepts that BeautifulMermaid's parser doesn't:
+    ///
+    /// - A YAML front-matter block (`---\nconfig: …\n---`) before the
+    ///   diagram type. It only carries config we can't honour anyway
+    ///   (`wrappingWidth`, themes), so drop it rather than fail with
+    ///   `invalidHeader("---")`.
+    /// - Inline HTML formatting in labels (`<b>`, `<i>`, `<code>`, …).
+    ///   The parser passes those through as literal text. Strip the tags
+    ///   and keep the content; `<br/>` is understood and left alone.
+    static func sanitize(_ source: String) -> String {
+        var lines = source.components(separatedBy: "\n")
+        // Front matter: leading `---` line … next `---` line.
+        if let first = lines.firstIndex(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+           lines[first].trimmingCharacters(in: .whitespaces) == "---",
+           let close = lines[(first + 1)...].firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "---" }) {
+            lines.removeSubrange(first...close)
+        }
+        var joined = lines.joined(separator: "\n")
+        // xychart: `line "interest" [...]` / `bar "x" [...]` — the parser
+        // only knows the unnamed form.
+        if joined.contains("xychart") {
+            joined = joined.replacingOccurrences(
+                of: #"(?m)^(\s*)(line|bar)\s+"[^"]*"\s*\["#,
+                with: "$1$2 [",
+                options: .regularExpression
+            )
+        }
+        joined = normalizeColors(in: joined)
+        joined = mergeStateDescriptions(in: joined)
+        // Parallelogram shapes `id[/text/]` and `id[\text\]`: the parser only
+        // knows the trapezoids `[/…\]` / `[\…/]`, so these fall through to the
+        // rectangle rule with the slashes (and quotes) left in the label.
+        // Draw them as plain rectangles; the shape is lost, the text isn't.
+        joined = joined.replacingOccurrences(
+            of: #"([\w-]+)\[/([^\]]+?)/\]"#, with: "$1[$2]", options: .regularExpression)
+        joined = joined.replacingOccurrences(
+            of: #"([\w-]+)\[\\([^\]]+?)\\\]"#, with: "$1[$2]", options: .regularExpression)
+        guard joined.contains("<") else { return joined }
+        return joined.replacingOccurrences(
+            of: #"</?(?:b|i|u|s|strong|em|small|sup|sub|span|code|tt|font|mark)(?:\s[^<>]*)?>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+    }
+
+    /// stateDiagram: Mermaid lets a state carry several `ID: text` lines
+    /// (the first is its title, the rest its body). The library's parser
+    /// keeps whichever registration of the ID comes first — often the bare
+    /// transition — and drops the rest. Fold all descriptions into one
+    /// `state "line<br/>line" as ID` alias placed right after the header,
+    /// which the parser does honour.
+    static func mergeStateDescriptions(in source: String) -> String {
+        var lines = source.components(separatedBy: "\n")
+        guard let header = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix("statediagram")
+        }) else { return source }
+        let descRegex = try! NSRegularExpression(pattern: #"^\s*([\w\p{L}-]+)\s*:\s*(.+?)\s*$"#)
+        let transitionRegex = try! NSRegularExpression(pattern: #"^\s*(\[\*\]|[\w\p{L}-]+)\s*-->"#)
+        var descriptions: [(id: String, lines: [String])] = []
+        var remove = IndexSet()
+        for (i, line) in lines.enumerated() where i > header {
+            let range = NSRange(line.startIndex..., in: line)
+            guard transitionRegex.firstMatch(in: line, range: range) == nil,
+                  let m = descRegex.firstMatch(in: line, range: range),
+                  let idRange = Range(m.range(at: 1), in: line),
+                  let textRange = Range(m.range(at: 2), in: line) else { continue }
+            let id = String(line[idRange])
+            let keywords: Set<String> = ["state", "direction", "classDef", "class", "style", "note", "linkStyle"]
+            if keywords.contains(id) { continue }
+            let text = String(line[textRange])
+            if let k = descriptions.firstIndex(where: { $0.id == id }) {
+                descriptions[k].lines.append(text)
+            } else {
+                descriptions.append((id, [text]))
+            }
+            remove.insert(i)
+        }
+        guard !descriptions.isEmpty else { return source }
+        for i in remove.sorted(by: >) { lines.remove(at: i) }
+        let aliases = descriptions.map { desc -> String in
+            let label = desc.lines.joined(separator: "<br/>").replacingOccurrences(of: "\"", with: "'")
+            return "    state \"\(label)\" as \(desc.id)"
+        }
+        lines.insert(contentsOf: aliases, at: header + 1)
+        return lines.joined(separator: "\n")
+    }
+
+    /// stateDiagram: the parser ignores `classDef` / `class` / `style` lines
+    /// (flowcharts get them). Read them from the source and put them on the
+    /// model, where the shared layout resolves them like a flowchart's.
+    private static func applyStateStyles(in model: inout ParsedGraphModel, source: String) {
+        func props(_ text: String) -> [String: String] {
+            var out: [String: String] = [:]
+            for pair in text.replacingOccurrences(of: #";\s*$"#, with: "", options: .regularExpression).split(separator: ",") {
+                guard let colon = pair.firstIndex(of: ":") else { continue }
+                let key = pair[..<colon].trimmingCharacters(in: .whitespaces)
+                let value = pair[pair.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                if !key.isEmpty, !value.isEmpty { out[key] = value }
+            }
+            return out
+        }
+        for raw in source.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if let m = line.range(of: #"^classDef\s+(\w+)\s+(.+)$"#, options: .regularExpression) {
+                let parts = String(line[m]).dropFirst("classDef".count).trimmingCharacters(in: .whitespaces)
+                if let space = parts.firstIndex(of: " ") {
+                    model.classDefs[String(parts[..<space])] = props(String(parts[parts.index(after: space)...]))
+                }
+            } else if let m = line.range(of: #"^class\s+([\w\p{L}-]+(?:\s*,\s*[\w\p{L}-]+)*)\s+(\w+)\s*$"#, options: .regularExpression) {
+                let parts = String(line[m]).dropFirst("class".count).trimmingCharacters(in: .whitespaces)
+                guard let space = parts.lastIndex(of: " ") else { continue }
+                let className = String(parts[parts.index(after: space)...])
+                for id in parts[..<space].split(separator: ",") {
+                    model.classAssignments[id.trimmingCharacters(in: .whitespaces)] = className
+                }
+            } else if let m = line.range(of: #"^style\s+([\w\p{L}-]+)\s+(.+)$"#, options: .regularExpression) {
+                let parts = String(line[m]).dropFirst("style".count).trimmingCharacters(in: .whitespaces)
+                if let space = parts.firstIndex(of: " ") {
+                    model.nodeStyles[String(parts[..<space])] = props(String(parts[parts.index(after: space)...]))
+                }
+            }
+        }
+    }
+
+    /// The library's `BMColor(hex:)` accepts only 6- or 8-digit hex and turns
+    /// anything else into black — so `style RET fill:#eee` painted a black
+    /// box. Expand CSS shorthand (`#eee` → `#eeeeee`, `#abcd` → `#aabbccdd`)
+    /// and translate the CSS colour names Mermaid docs actually use.
+    static func normalizeColors(in source: String) -> String {
+        guard source.contains("fill") || source.contains("stroke") || source.contains("color") else { return source }
+        var out = source
+        // Only touch styling lines; a label could legitimately contain "#abc".
+        let lines = out.components(separatedBy: "\n").map { line -> String in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            guard t.hasPrefix("style ") || t.hasPrefix("classDef ") || t.hasPrefix("linkStyle ") else { return line }
+            var l = line.replacingOccurrences(
+                of: #"#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])?\b"#,
+                with: "#$1$1$2$2$3$3$4$4",
+                options: .regularExpression
+            )
+            for (name, hex) in cssColorNames {
+                l = l.replacingOccurrences(
+                    of: #"(?i)((?:fill|stroke|color)\s*:\s*)\#(name)\b"#,
+                    with: "$1\(hex)",
+                    options: .regularExpression
+                )
+            }
+            return l
+        }
+        out = lines.joined(separator: "\n")
+        return out
+    }
+
+    private static let cssColorNames: [(String, String)] = [
+        ("white", "#ffffff"), ("black", "#000000"), ("red", "#ff0000"), ("green", "#008000"),
+        ("blue", "#0000ff"), ("yellow", "#ffff00"), ("orange", "#ffa500"), ("purple", "#800080"),
+        ("gray", "#808080"), ("grey", "#808080"), ("lightgray", "#d3d3d3"), ("lightgrey", "#d3d3d3"),
+        ("darkgray", "#a9a9a9"), ("silver", "#c0c0c0"), ("pink", "#ffc0cb"), ("lightblue", "#add8e6"),
+        ("lightgreen", "#90ee90"), ("lightyellow", "#ffffe0"), ("gold", "#ffd700"), ("teal", "#008080"),
+        ("navy", "#000080"), ("maroon", "#800000"), ("olive", "#808000"), ("cyan", "#00ffff"),
+        ("magenta", "#ff00ff"), ("brown", "#a52a2a"), ("beige", "#f5f5dc"), ("ivory", "#fffff0"),
+        ("lavender", "#e6e6fa"), ("coral", "#ff7f50"), ("salmon", "#fa8072"), ("tomato", "#ff6347"),
+        ("crimson", "#dc143c"), ("indigo", "#4b0082"), ("violet", "#ee82ee"), ("khaki", "#f0e68c"),
+        ("tan", "#d2b48c"), ("wheat", "#f5deb3"), ("mintcream", "#f5fffa"), ("honeydew", "#f0fff0"),
+        ("aliceblue", "#f0f8ff"), ("whitesmoke", "#f5f5f5"), ("gainsboro", "#dcdcdc"), ("snow", "#fffafa"),
+        ("transparent", "#00000000"), ("none", "#00000000"),
+    ]
+
+    // The parser lets a node be claimed by several subgraphs (e.g. `A --> B`
+    // inside `subgraph X` and `B` declared in `subgraph Y`). The layout builder
+    // then emits B as a child of both compound nodes, and ELK asserts on the
+    // edge-container mismatch. Mermaid.js gives the node to the subgraph that
+    // mentioned it last; do the same so each node has exactly one owner.
+    private static func normalizeSubgraphOwnership(_ model: ParsedGraphModel) {
+        var owner: [String: ObjectIdentifier] = [:]
+        func claim(_ subgraph: original_src_types.MermaidSubgraph) {
+            for id in subgraph.nodeIds { owner[id] = ObjectIdentifier(subgraph) }
+            subgraph.children.forEach(claim)
+        }
+        func prune(_ subgraph: original_src_types.MermaidSubgraph) {
+            let me = ObjectIdentifier(subgraph)
+            subgraph.nodeIds.removeAll { owner[$0] != me }
+            subgraph.children.forEach(prune)
+        }
+        model.subgraphs.forEach(claim)
+        model.subgraphs.forEach(prune)
     }
 }
 
@@ -475,27 +1137,6 @@ private extension NSImage {
         }
         return max(cgImage.bytesPerRow * cgImage.height, 1)
     }
-
-    func flippedVertically() -> NSImage? {
-        var rect = CGRect(origin: .zero, size: size)
-        guard let cgImage = cgImage(forProposedRect: &rect, context: nil, hints: nil),
-              let context = CGContext(
-                data: nil,
-                width: cgImage.width,
-                height: cgImage.height,
-                bitsPerComponent: cgImage.bitsPerComponent,
-                bytesPerRow: 0,
-                space: cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-              ) else { return nil }
-
-        context.translateBy(x: 0, y: CGFloat(cgImage.height))
-        context.scaleBy(x: 1, y: -1)
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
-
-        guard let flipped = context.makeImage() else { return nil }
-        return NSImage(cgImage: flipped, size: size)
-    }
 }
 
 private extension MDVTheme {
@@ -504,7 +1145,15 @@ private extension MDVTheme {
         let foregroundColor = nsColor(for: text, fallbackRGBA: isDark ? 0xC9D1D9FF : 0x24292FFF)
         let accentColor = nsColor(for: accent, fallbackRGBA: isDark ? 0x58A6FFFF : 0x0969DAFF)
         let lineColor = backgroundColor.mixed(with: foregroundColor, amount: isDark ? 0.70 : 0.62)
-        let nodeSurfaceColor = backgroundColor.mixed(with: foregroundColor, amount: isDark ? 0.16 : 0.06)
+        // Light themes: nodes take the page colour so labels — and typeset
+        // math especially — sit on the same ground as the body text instead
+        // of a grey that's darker than the panel; the border keeps them
+        // legible where page and code backgrounds coincide. Dark themes
+        // keep the lifted surface.
+        let pageColor = nsColor(for: background, fallbackRGBA: 0xFFFFFFFF)
+        let nodeSurfaceColor = isDark
+            ? backgroundColor.mixed(with: foregroundColor, amount: 0.16)
+            : pageColor.mixed(with: backgroundColor, amount: 0.25)
         let nodeBorderColor = backgroundColor.mixed(with: foregroundColor, amount: isDark ? 0.58 : 0.42)
 
         return DiagramTheme(

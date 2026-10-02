@@ -62,7 +62,16 @@ struct ContentView: View {
     @State private var tocSearchQuery: String = ""
     @State private var tocSearchVisible: Bool = false
     @FocusState private var tocSearchFocused: Bool
-    private let inspectorWidth: CGFloat = 240
+    /// Inspector (TOC + bookmarks) width. Drag the divider on its left edge
+    /// to resize; persisted, unlike the history sidebar, because the TOC
+    /// is where long headings live and the chosen width is a real preference.
+    @AppStorage("mdv_inspector_width") private var inspectorWidthRaw: Double = 240
+    private var inspectorWidth: CGFloat {
+        min(max(CGFloat(inspectorWidthRaw), minInspectorWidth), maxInspectorWidth)
+    }
+    private let minInspectorWidth: CGFloat = 180
+    private let maxInspectorWidth: CGFloat = 520
+    @State private var inspectorHandleHovered = false
 
     // External editor (Edit button in toolbar)
     @AppStorage("mdv_editor_app_path") private var editorAppPath: String = ""
@@ -175,7 +184,12 @@ struct ContentView: View {
 
     struct TOCHeading: Identifiable {
         let level: Int
+        /// Display text: inline markdown stripped, math spans rendered as
+        /// Unicode (`$\pi$` → π).
         let text: String
+        /// Same but with math left as source, for GitHub-compatible slugs
+        /// (`#monte-carlo-pi-estimator`, not `…-π-…`).
+        let slugText: String
         let blockIndex: Int
         var id: Int { blockIndex }
     }
@@ -377,7 +391,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if inspectorVisible {
-                Divider()
+                inspectorDragHandle
                 inspectorPanel
                     .frame(width: inspectorWidth)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -1214,6 +1228,31 @@ struct ContentView: View {
         )
     }
 
+    /// Mirror of `dragHandle` for the inspector's left edge. Dragging left
+    /// widens the panel. No collapse chevron — the toolbar button owns that.
+    private var inspectorDragHandle: some View {
+        ZStack {
+            Color.clear
+                .frame(width: 8)
+                .contentShape(Rectangle())
+            Rectangle()
+                .fill(inspectorHandleHovered ? themes.current.accent.opacity(0.5) : themes.current.divider)
+                .frame(width: inspectorHandleHovered ? 2 : 1)
+                .animation(.easeInOut(duration: 0.15), value: inspectorHandleHovered)
+        }
+        .onHover { inside in
+            inspectorHandleHovered = inside
+            if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let newWidth = inspectorWidth - value.translation.width
+                    inspectorWidthRaw = Double(min(max(newWidth, minInspectorWidth), maxInspectorWidth))
+                }
+        )
+    }
+
     /// Thin (6pt) hot zone painted on the left edge while the sidebar is
     /// collapsed. The chevron-right expand button stays visible at all
     /// times — when the sidebar is hidden there's no other cue that it
@@ -2042,9 +2081,18 @@ struct ContentView: View {
             Text(highlightedAttributedString(for: block, idx: idx))
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
+            // Math spans become image references first; smartening runs
+            // after so it never touches LaTeX (it already skips `](…)` URLs).
+            let withMath = MathMarkdown.rewrite(
+                block,
+                fontSize: themes.current.baseFontSize * themes.fontScale,
+                headingSizeEms: themes.current.headingSizeEms,
+                color: NSColor(themes.current.text)
+            )
+            Markdown(smartTypographyEnabled ? smartenMarkdown(withMath) : withMath)
                 .markdownTheme(themes.current.markdownTheme(scale: themes.fontScale))
                 .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
+                .markdownInlineImageProvider(MathInlineImageProvider())
                 .markdownImageProvider(LocalImageProvider(
                     baseURL: currentDocumentDirectory,
                     loadRemoteImages: loadRemoteImages
@@ -2215,7 +2263,7 @@ struct ContentView: View {
     /// or pointed at something the parser didn't classify as a heading).
     private func scrollToFragment(_ fragment: String) {
         let target = headingSlug(fragment)
-        guard let heading = tocHeadings.first(where: { headingSlug($0.text) == target }) else {
+        guard let heading = tocHeadings.first(where: { headingSlug($0.slugText) == target }) else {
             return
         }
         tocScrollTrigger = heading.blockIndex
@@ -2556,7 +2604,7 @@ struct ContentView: View {
             else { prefix = nil }
             if let pfx = prefix {
                 let firstLine = block.components(separatedBy: "\n").first ?? block
-                return stripInlineMarkdown(String(firstLine.dropFirst(pfx.count)))
+                return stripInlineMarkdown(MathMarkdown.plainText(String(firstLine.dropFirst(pfx.count))))
             }
         }
         // No heading nearby; use the block's own first content line as a label.
@@ -2823,7 +2871,7 @@ fileprivate struct ParsedDocument: Equatable {
         // code-blocks-or-prose, which mangles syntax highlighting.
         var result: [String] = []
         var current: [String] = []
-        var fenceMarker: String? = nil  // nil → outside, "```" or "~~~" → inside
+        var fenceMarker: String? = nil  // nil → outside, "```" / "~~~" / "$$" → inside
         let lines = raw.components(separatedBy: "\n")
 
         func flush() {
@@ -2837,9 +2885,19 @@ fileprivate struct ParsedDocument: Equatable {
             let trimmedStart = line.drop(while: { $0 == " " })
             if let marker = fenceMarker {
                 current.append(line)
-                if trimmedStart.hasPrefix(marker) {
+                // Code fences close at line start; a `$$` closer may trail
+                // the last line of the formula.
+                if marker == "$$" ? line.contains("$$") : trimmedStart.hasPrefix(marker) {
                     fenceMarker = nil
                 }
+                continue
+            }
+            // Display math opened on this line but not closed on it: blank
+            // lines inside belong to the formula, same as a code fence.
+            if trimmedStart.hasPrefix("$$"), !trimmedStart.dropFirst(2).contains("$$") {
+                if !current.isEmpty { flush() }
+                current.append(line)
+                fenceMarker = "$$"
                 continue
             }
             if trimmedStart.hasPrefix("```") {
@@ -2884,8 +2942,12 @@ fileprivate struct ParsedDocument: Equatable {
             // Single-line headings only
             let firstLine = trimmed.components(separatedBy: "\n").first ?? trimmed
             let raw = String(firstLine.dropFirst(prefix.count))
-            let text = stripInlineMarkdown(raw)
-            result.append(ContentView.TOCHeading(level: level, text: text, blockIndex: idx))
+            result.append(ContentView.TOCHeading(
+                level: level,
+                text: stripInlineMarkdown(MathMarkdown.plainText(raw)),
+                slugText: stripInlineMarkdown(raw),
+                blockIndex: idx
+            ))
         }
         return result
     }
@@ -3208,7 +3270,10 @@ struct LocalImageProvider: ImageProvider {
     @ViewBuilder
     private func content(for url: URL) -> some View {
         let resolved = resolve(url)
-        if resolved.scheme == "data" {
+        if resolved.scheme == MathSpec.scheme, let spec = MathSpec(url: resolved) {
+            // A `$$…$$` paragraph, rewritten by MathMarkdown.
+            MathDisplayView(spec: spec)
+        } else if resolved.scheme == "data" {
             dataURIImage(resolved)
         } else if resolved.isFileURL {
             localFileImage(resolved)
