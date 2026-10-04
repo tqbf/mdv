@@ -14,6 +14,9 @@ history sidebar with the rest.
   tree-sitter grammar** (bash, c, go, javascript, python, ruby,
   rust, toml, yaml). Use this to verify the syntax highlighter and
   the per-theme code palette.
+- [diff.md](diff.md) — `diff` and `patch` fenced blocks: a two-file
+  git diff, a header-less snippet, and a removed line that looks like
+  a `---` file header. Verifies diff tinting per theme.
 - [tables.md](tables.md) — alignment, long cells, narrow cells, the
   full GFM table corner cases
 - [images.md](images.md) — relative paths, absolute paths, missing
