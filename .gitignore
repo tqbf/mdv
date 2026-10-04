@@ -10,3 +10,6 @@ build_icon/
 
 # macOS
 .DS_Store
+
+# Bundled third-party JS assets (downloaded by build setup, not committed)
+mdv/mermaid.min.js

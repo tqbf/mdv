@@ -22,6 +22,8 @@ of an evening while yelling at people about zoning reform.
 
 * Bookmarks, across all files, the first 5 of which are hotkeyed `CMD-[1-5]`, and a transient in-memory `CMD-0` placeholder. Every program must evolve until it manages bookmarks.
 
+* It renders **Mermaid diagrams** — flowcharts, sequence diagrams, ER diagrams, state diagrams, XY charts, gantt charts, and whatever else mermaid.js knows about. The native renderer (BeautifulMermaid) handles the common graph types; anything it can't render falls back to a bundled mermaid.js running in a WKWebView. Style picker included.
+
 * It may do other things I've forgotten about. 
 
 ## Installing
