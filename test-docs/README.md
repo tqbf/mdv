@@ -10,6 +10,15 @@ history sidebar with the rest.
 - [syntax.md](syntax.md) — every CommonMark + GFM construct mdv
   knows how to render: paragraphs, emphasis, links, lists, tables,
   task lists, blockquotes, footnotes, horizontal rules, escaping
+- [frontmatter.md](frontmatter.md) — a YAML metadata header at the top
+  of a file, with the folded scalars, sequences, and nested mappings
+  real headers use. Three companions cover the rest of the family:
+  [frontmatter-ellipsis-close.md](frontmatter-ellipsis-close.md) (`...`
+  closer, blank line inside the header),
+  [frontmatter-toml.md](frontmatter-toml.md) (`+++` fences, multi-line
+  array), and [frontmatter-negative.md](frontmatter-negative.md), which
+  opens with a genuine thematic break and must keep rendering as
+  ordinary prose.
 - [code.md](code.md) — fenced code blocks for **every bundled
   tree-sitter grammar** (bash, c, go, javascript, python, ruby,
   rust, toml, yaml). Use this to verify the syntax highlighter and

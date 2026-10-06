@@ -19,6 +19,11 @@ struct mdvApp: App {
     /// without a notification round-trip.
     @AppStorage("mdv_load_remote_images") private var loadRemoteImages: Bool = false
 
+    /// Persistent toggle for showing a document's metadata header. Default
+    /// on; lifted into App scope for the View menu Toggle the same way as
+    /// the preferences above.
+    @AppStorage("mdv_show_frontmatter") private var showFrontmatter: Bool = true
+
     /// Mirror of the per-window collapse state, so the View menu can show
     /// "Hide Sidebar" vs. "Show Sidebar" and the menu-bar toggle title
     /// reflects reality. Single-window app, so a global @AppStorage matches
@@ -177,6 +182,7 @@ struct mdvApp: App {
                 // Looked up by title from `LocalImageProvider.revealRemoteImagesMenuItem`,
                 // so don't change the visible string without updating that match.
                 Toggle("Load Remote Images", isOn: $loadRemoteImages)
+                Toggle("Show Frontmatter", isOn: $showFrontmatter)
             }
             CommandGroup(replacing: .help) {
                 Button("mdv Help") {
