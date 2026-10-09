@@ -2034,13 +2034,7 @@ struct ContentView: View {
     @ViewBuilder
     private func blockView(block: String, idx: Int) -> some View {
         if shouldInlineHighlight(block: block, idx: idx) {
-            // Find-highlight path: render straight punctuation. Smartening
-            // here would shift character offsets and misalign the yellow
-            // highlight ranges (which were computed against rawMarkdown).
-            // The mismatch only surfaces while find is active in matched
-            // blocks; everything else still gets smart typography.
-            Text(highlightedAttributedString(for: block, idx: idx))
-                .frame(maxWidth: .infinity, alignment: .leading)
+            findHighlightView(block: block, idx: idx)
         } else {
             Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
                 .markdownTheme(themes.current.markdownTheme(scale: themes.fontScale))
@@ -2269,7 +2263,75 @@ struct ContentView: View {
         return true
     }
 
-    private func highlightedAttributedString(for block: String, idx: Int) -> AttributedString {
+    /// Find-highlight path: the block is rendered as a plain `Text` so each
+    /// query occurrence can carry its own background, which MarkdownUI's
+    /// block styles can't express. Renders straight punctuation: smartening
+    /// here would shift character offsets and misalign the yellow highlight
+    /// ranges (which were computed against rawMarkdown). The mismatch only
+    /// surfaces while find is active in matched blocks; everything else
+    /// still gets smart typography.
+    private func findHighlightView(block: String, idx: Int) -> some View {
+        let level = headingLevel(of: block)
+        let style = findBlockStyle(headingLevel: level)
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(highlightedAttributedString(for: block, idx: idx, style: style))
+                .font(style.font)
+                .lineSpacing(style.lineSpacing)
+                .padding(.bottom, level == 1 || level == 2 ? style.size * 0.3 : 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if style.rule { Divider().overlay(themes.current.divider) }
+        }
+    }
+
+    /// ATX heading level (1–6) of a block, or nil for body text.
+    private func headingLevel(of block: String) -> Int? {
+        let trimmed = block.trimmingCharacters(in: .whitespaces)
+        let hashes = trimmed.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(hashes), trimmed.dropFirst(hashes).first == " " else { return nil }
+        return hashes
+    }
+
+    /// Block-level typography for the find-highlight path, mirroring the
+    /// theme's MarkdownUI text/heading styles so a matched block keeps the
+    /// face, size, weight, color and leading of its neighbors.
+    private struct FindBlockStyle {
+        let font: Font
+        let size: CGFloat
+        let color: Color
+        let lineSpacing: CGFloat
+        let rule: Bool
+    }
+
+    private func findBlockStyle(headingLevel: Int?) -> FindBlockStyle {
+        let theme = themes.current
+        let bodySize = theme.baseFontSize * themes.fontScale
+        let em: CGFloat
+        var color = theme.heading
+        var rule = false
+        switch headingLevel {
+        case 1: em = theme.h1SizeEm; rule = theme.showH1Rule
+        case 2: em = theme.h2SizeEm; rule = theme.showH2Rule
+        case 3: em = theme.h3SizeEm
+        case 4: em = 1.0
+        case 5: em = 0.875
+        case 6: em = 0.85; color = theme.tertiaryText
+        default: em = 1.0; color = theme.text
+        }
+        let size = round(bodySize * em)   // MarkdownUI rounds resolved sizes too
+        var font = theme.bodyFont(size: size)
+        let lineEm: CGFloat
+        if headingLevel != nil {
+            font = font.weight(theme.headingFontWeight)
+            lineEm = 0.125
+        } else {
+            lineEm = theme.paragraphLineSpacingEm
+        }
+        return FindBlockStyle(font: font, size: size, color: color,
+                              lineSpacing: size * lineEm, rule: rule)
+    }
+
+    private func highlightedAttributedString(for block: String, idx: Int,
+                                             style: FindBlockStyle) -> AttributedString {
         let theme = themes.current
         let isCurrentBlock = matches.indices.contains(currentMatchIndex)
                           && matches[currentMatchIndex].blockIndex == idx
@@ -2298,7 +2360,36 @@ struct ContentView: View {
         } catch {
             attr = AttributedString(cleaned)
         }
-        attr.foregroundColor = NSColor(theme.text)
+        attr.foregroundColor = NSColor(style.color)
+
+        // Inline runs: express the theme's code/strong/emphasis/link styling
+        // explicitly (weight and colors are per-theme, not SwiftUI's
+        // defaults) and clear the presentation intent so Text doesn't
+        // layer its own bold/italic/monospace on top. Snapshot the runs
+        // first; setting attributes re-segments them.
+        let runs = attr.runs.map { ($0.range, $0.inlinePresentationIntent ?? [], $0.link) }
+        for (range, intent, link) in runs {
+            var font: Font? = nil
+            if intent.contains(.code) {
+                font = .system(size: round(style.size * 0.90), design: .monospaced)
+                attr[range].backgroundColor = NSColor(theme.secondaryBackground)
+            }
+            if intent.contains(.stronglyEmphasized) {
+                font = (font ?? style.font).weight(theme.strongFontWeight)
+                attr[range].foregroundColor = NSColor(theme.strong)
+            }
+            if intent.contains(.emphasized) {
+                font = (font ?? style.font).italic()
+            }
+            if intent.contains(.strikethrough) {
+                attr[range].strikethroughStyle = .single
+            }
+            if link != nil {
+                attr[range].foregroundColor = NSColor(theme.link)
+            }
+            attr[range].font = font
+            attr[range].inlinePresentationIntent = nil
+        }
 
         // Highlight each occurrence of the query. Current-match block gets
         // a stronger yellow so the navigation focus is obvious.

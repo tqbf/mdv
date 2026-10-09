@@ -410,6 +410,16 @@ extension MDVTheme {
     /// block builders so spacing/typography stays consistent across themes.
     var markdownTheme: Theme { markdownTheme(scale: 1.0) }
 
+    /// SwiftUI font for `bodyFontFamily` at `size`, for text rendered
+    /// outside MarkdownUI (the find-highlight path) that has to match the
+    /// article's body face. Mirrors MarkdownUI's own family resolution.
+    func bodyFont(size: CGFloat) -> Font {
+        switch bodyFontFamily {
+        case .system(let design): return .system(size: size, design: design)
+        case .custom(let name): return .custom(name, fixedSize: size)
+        }
+    }
+
     /// Same as `markdownTheme` but multiplies the body font size by `scale`.
     /// Heading sizes are em-relative so they scale automatically with body;
     /// per-element point spacing is left as-is to match browser-style zoom
