@@ -2277,14 +2277,32 @@ struct ContentView: View {
         // Strip block-level markers per line so the inline render reads
         // cleanly. Lists keep a literal bullet so the user sees the list
         // shape; headings/blockquotes/numbered lists drop the marker.
-        let cleaned = block.components(separatedBy: "\n").map { line -> String in
+        // Source newlines are soft breaks (a space) as in the rendered
+        // block, except before a list item or after a hard break (trailing
+        // two spaces or backslash); .inlineOnlyPreservingWhitespace would
+        // otherwise keep every one as a line break.
+        var cleaned = ""
+        var hardBreak = false
+        for (i, line) in block.components(separatedBy: "\n").enumerated() {
             var l = line
             l = l.replacingOccurrences(of: #"^#{1,6}\s+"#, with: "", options: .regularExpression)
             l = l.replacingOccurrences(of: #"^>\s?"#, with: "", options: .regularExpression)
+            let item = l.range(of: #"^\s*([-*+]|\d+[.)])\s"#, options: .regularExpression) != nil
             l = l.replacingOccurrences(of: #"^[-*+]\s+"#, with: "• ", options: .regularExpression)
             l = l.replacingOccurrences(of: #"^\d+\.\s+"#, with: "", options: .regularExpression)
-            return l
-        }.joined(separator: "\n")
+            let blank = l.trimmingCharacters(in: .whitespaces).isEmpty
+            if i > 0 {
+                if hardBreak || item || blank {
+                    cleaned += "\n"
+                } else {
+                    cleaned += " "
+                    l = String(l.drop(while: { $0 == " " || $0 == "\t" }))
+                }
+            }
+            hardBreak = blank || l.hasSuffix("  ") || l.hasSuffix("\\")
+            if l.hasSuffix("\\") { l.removeLast() }
+            cleaned += l
+        }
 
         var attr: AttributedString
         do {
