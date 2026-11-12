@@ -2042,13 +2042,31 @@ struct ContentView: View {
             Text(highlightedAttributedString(for: block, idx: idx))
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
-                .markdownTheme(themes.current.markdownTheme(scale: themes.fontScale))
-                .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
-                .markdownImageProvider(LocalImageProvider(
-                    baseURL: currentDocumentDirectory,
-                    loadRemoteImages: loadRemoteImages
-                ))
+            // MarkdownUI loads inline images once per block content and keeps
+            // them in view state, so flipping Load Remote Images wouldn't
+            // reload them. Keying the view on the toggle forces a fresh load.
+            // Only blocks that contain an image are re-keyed: remounting
+            // resets per-block state (code wrap, Mermaid source/zoom) and can
+            // shift the scroll position. The `.id` sits inside a container on
+            // purpose: applied to this function's outermost view instead,
+            // only the first block of the document renders.
+            VStack(alignment: .leading, spacing: 0) {
+                Markdown(smartTypographyEnabled ? smartenMarkdown(block) : block)
+                    .markdownTheme(themes.current.markdownTheme(scale: themes.fontScale))
+                    .markdownCodeSyntaxHighlighter(.mdv(theme: themes.current))
+                    .markdownImageProvider(LocalImageProvider(
+                        baseURL: currentDocumentDirectory,
+                        loadRemoteImages: loadRemoteImages
+                    ))
+                    // Only one inline provider takes effect (the innermost
+                    // modifier wins). A provider for another URL scheme should
+                    // fall back to this one, not to MarkdownUI's default, or
+                    // remote inline images bypass the toggle again.
+                    .markdownInlineImageProvider(RemoteGatedInlineImageProvider(
+                        loadRemoteImages: loadRemoteImages
+                    ))
+                    .id(loadRemoteImages && block.contains("!["))
+            }
         }
     }
 
